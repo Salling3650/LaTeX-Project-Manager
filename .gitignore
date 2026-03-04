@@ -2,6 +2,13 @@
 .DS_Store
 **/.DS_Store
 
+# Templates – ignore everything except main.tex and whitelisted folders
+templates/*
+!templates/main.tex
+# To track a specific template folder, add two lines like these:
+# !templates/My Template/
+# !templates/My Template/**
+
 # LaTeX build artifacts
 **/.build/
 *.aux

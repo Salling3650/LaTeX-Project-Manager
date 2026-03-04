@@ -9,6 +9,18 @@ A terminal-based menu script for creating and managing LaTeX projects from templ
 - Open an existing project in Neovim
 - Auto-compiles to PDF after editing
 
+## Templates
+
+Place your own template folders inside the `templates/` directory.  
+Each subfolder will appear as an option in the **Template selector** menu.
+
+```
+templates/
+    My Template/
+        main.tex
+        ...
+```
+
 ## Usage
 
 ```bash

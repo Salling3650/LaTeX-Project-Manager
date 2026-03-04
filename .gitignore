@@ -9,6 +9,10 @@ templates/*
 # !templates/My Template/
 # !templates/My Template/**
 
+# Templates – ignore everything except .gitkeep
+projects/*
+!projects/.gitkeep
+
 # LaTeX build artifacts
 **/.build/
 *.aux

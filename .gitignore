@@ -1,0 +1,15 @@
+# macOS
+.DS_Store
+**/.DS_Store
+
+# LaTeX build artifacts
+**/.build/
+*.aux
+*.log
+*.fdb_latexmk
+*.fls
+*.synctex.gz
+*.toc
+*.out
+missfont.log
+*.pdf

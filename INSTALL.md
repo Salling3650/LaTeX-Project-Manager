@@ -1,11 +1,92 @@
-# LaTeX Project Manager – Setup Guide
+# LaTeX Manager – Setup Guide
 
-> Primarily designed for **macOS**, but works on **Linux** with minor adjustments (noted below).
+> Primarily designed for **macOS**.
 
 ## Requirements
 
 | Tool | Purpose | Install |
-|------|---------|---------|
+|------|---------|--------|
+| `rust` + `cargo` | Build the TUI | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
+| `python3` + `pyfiglet` | ASCII title (build-time only) | `pip3 install pyfiglet` |
+| `nvim` | Edit `.tex` files | `brew install neovim` |
+| `latexmk` | Compile LaTeX | Included with MacTeX / BasicTeX |
+| `tdf` | Open PDF in terminal | See note below |
+| `rsync` | Copy templates | Pre-installed on macOS |
+
+## Build
+
+```bash
+cd /path/to/Latex/tui
+cargo build --release
+```
+
+The binary is at `tui/target/release/tui`.
+
+## Quick launch with `lx`
+
+Create a global symlink so you can type `lx` anywhere:
+
+```bash
+ln -sf "$(pwd)/tui/target/release/tui" /usr/local/bin/lx
+```
+
+Then run from the workspace root (so `templates/` is found automatically):
+
+```bash
+cd /path/to/Latex && lx
+```
+
+## LaTeX distribution
+
+```bash
+# Full MacTeX (~5 GB)
+brew install --cask mactex
+
+# Or BasicTeX (~100 MB) + latexmk
+brew install --cask basictex
+sudo tlmgr update --self && sudo tlmgr install latexmk
+```
+
+## `tdf` – PDF viewer
+
+The TUI calls `tdf <path>` after a successful compile. Set it up as an alias in `~/.zshrc`:
+
+```bash
+# macOS Preview
+echo 'alias tdf="open -a Preview"' >> ~/.zshrc
+
+# Skim
+echo 'alias tdf="open -a Skim"' >> ~/.zshrc
+
+# zathura (Linux)
+echo 'alias tdf="zathura"' >> ~/.zshrc
+
+source ~/.zshrc
+```
+
+## Workspace auto-detection
+
+The binary finds the workspace root by walking up from its location looking for a `templates/` directory. You can also override it in `tui/tui.conf`:
+
+```
+workspace_root = /path/to/Latex
+```
+
+## Customising the TUI
+
+Edit `tui/tui.conf` to change colours:
+
+```
+accent_color = cyan
+footer_color = dark_gray
+```
+
+Edit `tui/src/menu.rs` to add, remove, or reorder menu items, then rebuild:
+
+```bash
+cargo build --release
+```
+
 | `bash` | Run the script | Pre-installed on macOS |
 | `figlet` | Header banner | `brew install figlet` |
 | `nvim` | Edit `.tex` files | `brew install neovim` |

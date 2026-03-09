@@ -1,31 +1,34 @@
-# LaTeX Project Manager
+# LaTeX Manager
 
-A terminal-based menu script for creating and managing LaTeX projects from templates.
+A terminal UI for creating and managing LaTeX projects, built with Rust + [ratatui](https://github.com/ratatui-org/ratatui).
 
 ## Features
 
-- Create a blank LaTeX project
-- Create a project from a template folder
-- Open an existing project in Neovim
-- Auto-compiles to PDF after editing
-
-## Templates
-
-Place your own template folders inside the `templates/` directory.  
-Each subfolder will appear as an option in the **Template selector** menu.
-
-```
-templates/
-    My Template/
-        main.tex
-        ...
-```
+- **Blank project** — create a new project from `templates/main.tex`, open in Neovim, auto-compile
+- **Template selector** — pick a full template folder, name the project, open in Neovim, auto-compile
+- **Open project** — browse existing projects, open in Neovim, auto-compile
+- **Open project folder** — reveal the workspace in Finder
+- Streamed compile output in a popup window
+- Auto-opens the PDF in `tdf` after a successful compile
 
 ## Usage
 
 ```bash
-chmod +x menu.sh
-./menu.sh
+lx          # if the lx symlink is set up (see INSTALL.md)
+# or
+cd /path/to/Latex && ./tui/target/release/tui
 ```
 
-See [INSTALL.md](INSTALL.md) for setup and requirements.
+## Layout
+
+```
+Latex/
+    tui/            ← Rust source + binary
+    templates/      ← template folders (each subfolder = one option)
+        main.tex    ← used for "Blank project"
+        Stor opgave/
+        Lille opgave/
+    projects/       ← created automatically on first project
+```
+
+See [INSTALL.md](INSTALL.md) for build instructions and dependencies.

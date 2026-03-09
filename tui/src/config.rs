@@ -9,21 +9,19 @@ use std::path::PathBuf;
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub struct Config {
-    pub accent_color:      Color,
-    pub footer_color:      Color,
-    pub note_border_color: Color,
-    pub note_cursor_bg:    Color,
-    pub workspace_root:    PathBuf,
+    pub accent_color:   Color,
+    pub footer_color:   Color,
+    pub workspace_root: PathBuf,
+    pub pdf_viewer:     String,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config {
-            accent_color:      Color::Cyan,
-            footer_color:      Color::DarkGray,
-            note_border_color: Color::Yellow,
-            note_cursor_bg:    Color::Yellow,
-            workspace_root:    find_workspace_root(),
+            accent_color:   Color::Cyan,
+            footer_color:   Color::DarkGray,
+            workspace_root: find_workspace_root(),
+            pdf_viewer:     "tdf".to_string(),
         }
     }
 }
@@ -37,8 +35,9 @@ pub fn find_workspace_root() -> PathBuf {
             return cwd;
         }
     }
-    // 2. Walk up from binary path
+    // 2. Walk up from binary path — canonicalize first to resolve symlinks (e.g. /usr/local/bin/lx)
     if let Ok(exe) = env::current_exe() {
+        let exe = fs::canonicalize(&exe).unwrap_or(exe);
         let mut dir = exe.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
         for _ in 0..6 {
             if dir.join("templates").is_dir() {
@@ -112,10 +111,12 @@ pub fn load() -> Config {
         };
     }
 
-    pick_color!(accent_color,      "accent_color");
-    pick_color!(footer_color,      "footer_color");
-    pick_color!(note_border_color, "note_border_color");
-    pick_color!(note_cursor_bg,    "note_cursor_bg");
+    pick_color!(accent_color, "accent_color");
+    pick_color!(footer_color,   "footer_color");
+
+    if let Some(v) = pairs.get("pdf_viewer") {
+        cfg.pdf_viewer = v.clone();
+    }
 
     if let Some(v) = pairs.get("workspace_root") {
         let p = PathBuf::from(v);

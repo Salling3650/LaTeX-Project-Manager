@@ -275,17 +275,27 @@ fn main() -> io::Result<()> {
                 ])
                 .split(content_area);
 
-            // Choose art size based on available height (heights from build.rs)
-            let art_height: u16 = if area.height < 15 { 1 }
-                else if area.height < 25 { TITLE_SMALL_HEIGHT }
-                else { TITLE_LARGE_HEIGHT };
+            // Large font is always two lines (LaTeX / Manager stacked).
+            // Small font switches to two lines when the window is narrow.
+            let use_large = area.height >= 35;
+            let small_wide = area.width >= 56;
 
-            let ascii_lines: Vec<Line> = if area.height < 15 {
+            let art_height: u16 = if area.height < 20 { 1 }
+                else if use_large { TITLE_LARGE_NARROW_HEIGHT }
+                else if small_wide { TITLE_SMALL_WIDE_HEIGHT }
+                else { TITLE_SMALL_NARROW_HEIGHT };
+
+            let ascii_lines: Vec<Line> = if area.height < 20 {
                 vec![Line::from(Span::styled(APP_TITLE, Style::default().fg(cfg.accent_color).add_modifier(Modifier::BOLD)))]
-            } else if area.height < 25 {
-                TITLE_SMALL.iter().map(|l| Line::from(Span::styled(*l, Style::default().fg(cfg.accent_color)))).collect()
             } else {
-                TITLE_LARGE.iter().map(|l| Line::from(Span::styled(*l, Style::default().fg(cfg.accent_color)))).collect()
+                let art: &[&str] = if use_large {
+                    TITLE_LARGE_NARROW
+                } else if small_wide {
+                    TITLE_SMALL_WIDE
+                } else {
+                    TITLE_SMALL_NARROW
+                };
+                art.iter().map(|l| Line::from(Span::styled(*l, Style::default().fg(cfg.accent_color)))).collect()
             };
 
             // Outer block — one unified widget for art + items
@@ -448,8 +458,11 @@ fn main() -> io::Result<()> {
                             if pdf.exists() {
                                 disable_raw_mode()?;
                                 execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-                                let ok = Command::new("tdf").arg(&pdf).status()
-                                    .map(|s| s.success()).unwrap_or(false);
+                                let mut parts = cfg.pdf_viewer.split_whitespace();
+                                let ok = if let Some(prog) = parts.next() {
+                                    Command::new(prog).args(parts).arg(&pdf).status()
+                                        .map(|s| s.success()).unwrap_or(false)
+                                } else { false };
                                 if !ok {
                                     let _ = Command::new("open").arg(&pdf).status();
                                 }

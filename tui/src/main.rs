@@ -234,10 +234,11 @@ fn launch_compile(project_dir: PathBuf) -> PopupState {
     let texinputs = format!(".:./Config//:{}", env::var("TEXINPUTS").unwrap_or_default());
     // Use `'...'` quoting; escape any literal single-quotes in the path
     let safe_ti = texinputs.replace('\'', "'\\''");
-    // -g forces latexmk to reprocess even if it thinks nothing changed / had previous errors
+    // Run pdflatex twice so refs/TOC are resolved
     let script = format!(
-        "TEXINPUTS='{}' latexmk -pdf -quiet -g -f -outdir=.build main.tex",
-        safe_ti
+        "TEXINPUTS='{ti}' /Library/TeX/texbin/pdflatex -interaction=nonstopmode -output-directory=.build main.tex && \
+         TEXINPUTS='{ti}' /Library/TeX/texbin/pdflatex -interaction=nonstopmode -output-directory=.build main.tex",
+        ti = safe_ti
     );
     let shell_args = ["-c", script.as_str()];
     PopupState::new_output("Compiling", "sh", &shell_args, Some(project_dir))
@@ -471,7 +472,7 @@ fn main() -> io::Result<()> {
                                 terminal.clear()?;
                             } else {
                                 app.message = Some(
-                                    "Compilation failed \u{2014} run latexmk manually to see errors.".to_string()
+                                    "Compilation failed — check .build/main.log for errors.".to_string()
                                 );
                             }
                         }

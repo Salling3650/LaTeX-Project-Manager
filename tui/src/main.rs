@@ -164,6 +164,7 @@ enum WorkflowState {
     WaitingForTemplate     { projects_dir: PathBuf },
     WaitingForTemplateName { template_path: PathBuf, projects_dir: PathBuf },
     WaitingForProject,
+    WaitingForMindmapProject { tui_dir: PathBuf },
 }
 
 struct App {
@@ -441,7 +442,7 @@ fn main() -> io::Result<()> {
                 KeyCode::Enter => {
                     let idx = app.list_state.selected().unwrap_or(0);
                     menu::ITEMS.get(idx)
-                        .map(|item| Action::MenuAction((item.action)()))
+                        .map(|item| Action::MenuAction((item.action)(&cfg.workspace_root)))
                 }
                 _ => None,
             }
@@ -511,6 +512,15 @@ fn main() -> io::Result<()> {
                             terminal.clear()?;
                             app.pending_pdf = Some(project_dir.join(".build").join("main.pdf"));
                             app.popup = Some(launch_compile(project_dir));
+                        }
+                        (Some(project_dir), Some(WorkflowState::WaitingForMindmapProject { tui_dir })) => {
+                            let script = tui_dir.join("tui").join("latex-to-mindmap-portable.sh");
+                            app.popup = Some(PopupState::new_output(
+                                "Converting to mindmap",
+                                "bash",
+                                &[script.to_str().unwrap_or("."), project_dir.to_str().unwrap_or(".")],
+                                None,
+                            ));
                         }
                         _ => { app.message = Some("Nothing selected.".to_string()); }
                     }
@@ -618,6 +628,14 @@ fn main() -> io::Result<()> {
                         } else {
                             app.workflow = Some(WorkflowState::WaitingForProject);
                             app.popup = Some(PopupState::new_dir_browser("Select a project:", &projects_dir));
+                        }
+                    }
+                    menu::Action::ConvertToMindmap { projects_dir, tui_dir } => {
+                        if !projects_dir.is_dir() {
+                            app.message = Some(format!("Projects dir not found: {}", projects_dir.display()));
+                        } else {
+                            app.workflow = Some(WorkflowState::WaitingForMindmapProject { tui_dir });
+                            app.popup = Some(PopupState::new_dir_browser("Select a project to convert:", &projects_dir));
                         }
                     }
                 },

@@ -30,10 +30,13 @@
 //    Action::Quit
 //        Exits the TUI.
 //
+//    Action::ConvertToMindmap { tui_dir }
+//        Lets the user select a LaTeX project, then converts it to an
+//        interactive mind map HTML file using the portable converter.
+//
 // ─────────────────────────────────────────────────────────────────────────────
 
 use std::path::PathBuf;
-use crate::config;
 
 // ── The action each menu item triggers ───────────────────────────────────────
 
@@ -52,13 +55,15 @@ pub enum Action {
     CreateFromTemplate { templates_dir: PathBuf, projects_dir: PathBuf },
     /// Browse projects/, open the selected project in nvim.
     OpenLatexProject { projects_dir: PathBuf },
+    /// Browse projects/, select one, convert to mindmap HTML.
+    ConvertToMindmap { projects_dir: PathBuf, tui_dir: PathBuf },
 }
 
 // ── A single menu entry ───────────────────────────────────────────────────────
 
 pub struct MenuItem {
     pub label: &'static str,
-    pub action: fn() -> Action,
+    pub action: fn(&std::path::Path) -> Action,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -69,8 +74,7 @@ pub const ITEMS: &[MenuItem] = &[
 
     MenuItem {
         label: "Blank project",
-        action: || {
-            let root = config::find_workspace_root();
+        action: |root| {
             Action::CreateBlankProject {
                 templates_dir: root.join("templates"),
                 projects_dir:  root.join("projects"),
@@ -80,8 +84,7 @@ pub const ITEMS: &[MenuItem] = &[
 
     MenuItem {
         label: "Template selector",
-        action: || {
-            let root = config::find_workspace_root();
+        action: |root| {
             Action::CreateFromTemplate {
                 templates_dir: root.join("templates"),
                 projects_dir:  root.join("projects"),
@@ -91,8 +94,7 @@ pub const ITEMS: &[MenuItem] = &[
 
     MenuItem {
         label: "Open project",
-        action: || {
-            let root = config::find_workspace_root();
+        action: |root| {
             Action::OpenLatexProject {
                 projects_dir: root.join("projects"),
             }
@@ -100,15 +102,25 @@ pub const ITEMS: &[MenuItem] = &[
     },
 
     MenuItem {
+        label: "Convert to mindmap",
+        action: |root| {
+            Action::ConvertToMindmap {
+                projects_dir: root.join("projects"),
+                tui_dir: root.to_path_buf(),
+            }
+        },
+    },
+
+    MenuItem {
         label: "Open project folder",
-        action: || Action::RevealInFinder {
-            path: config::find_workspace_root(),
+        action: |root| Action::RevealInFinder {
+            path: root.to_path_buf(),
         },
     },
 
     MenuItem {
         label: "Exit",
-        action: || Action::Quit,
+        action: |_| Action::Quit,
     },
 
 ];

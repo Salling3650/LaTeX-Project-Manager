@@ -165,6 +165,7 @@ enum WorkflowState {
     WaitingForTemplateName { template_path: PathBuf, projects_dir: PathBuf },
     WaitingForProject,
     WaitingForMindmapProject { tui_dir: PathBuf },
+    WaitingForEditorChoice,
 }
 
 struct App {
@@ -245,8 +246,81 @@ fn launch_compile(project_dir: PathBuf) -> PopupState {
     PopupState::new_output("Compiling", "sh", &shell_args, Some(project_dir))
 }
 
+fn open_editor_in_project(
+    editor: &str,
+    project_dir: &std::path::Path,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) -> io::Result<()> {
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+
+    let editor_lc = editor.trim().to_lowercase();
+    let mut cmd = if matches!(editor_lc.as_str(), "vscode" | "code") {
+        let mut cmd = Command::new("code");
+        cmd.arg(".").arg("-g").arg("main.tex");
+        cmd
+    } else {
+        let mut cmd = Command::new("nvim");
+        cmd.arg("main.tex");
+        cmd
+    };
+    cmd.current_dir(project_dir);
+    let status = cmd.status()?;
+    if !status.success() {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("Editor exited with status {}", status),
+        ));
+    }
+
+    enable_raw_mode()?;
+    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+    terminal.clear()?;
+    Ok(())
+}
+
+fn open_file_in_editor(
+    editor: &str,
+    file_path: &std::path::Path,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+) -> io::Result<()> {
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+
+    let editor_lc = editor.trim().to_lowercase();
+    let mut cmd = if matches!(editor_lc.as_str(), "vscode" | "code") {
+        let mut cmd = Command::new("code");
+        cmd.arg("-g").arg(file_path);
+        cmd
+    } else {
+        let mut cmd = Command::new("nvim");
+        cmd.arg(file_path);
+        cmd
+    };
+
+    if let Some(parent) = file_path.parent() {
+        cmd.current_dir(parent);
+    }
+    let status = cmd.status()?;
+    if !status.success() {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("Editor exited with status {}", status),
+        ));
+    }
+
+    enable_raw_mode()?;
+    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+    terminal.clear()?;
+    Ok(())
+}
+
+fn should_auto_compile(editor: &str) -> bool {
+    editor.trim().eq_ignore_ascii_case("nvim")
+}
+
 fn main() -> io::Result<()> {
-    let cfg = config::load();
+    let mut cfg = config::load();
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -504,14 +578,15 @@ fn main() -> io::Result<()> {
                             app.popup = Some(PopupState::new_text_input("Enter project name:"));
                         }
                         (Some(project_dir), Some(WorkflowState::WaitingForProject)) => {
-                            disable_raw_mode()?;
-                            execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-                            let _ = Command::new("nvim").arg("main.tex").current_dir(&project_dir).status();
-                            enable_raw_mode()?;
-                            execute!(terminal.backend_mut(), EnterAlternateScreen)?;
-                            terminal.clear()?;
-                            app.pending_pdf = Some(project_dir.join(".build").join("main.pdf"));
-                            app.popup = Some(launch_compile(project_dir));
+                            if let Err(e) = open_editor_in_project(&cfg.editor, &project_dir, &mut terminal) {
+                                app.message = Some(format!("Failed to launch editor: {}", e));
+                            }
+                            if should_auto_compile(&cfg.editor) {
+                                app.pending_pdf = Some(project_dir.join(".build").join("main.pdf"));
+                                app.popup = Some(launch_compile(project_dir));
+                            } else {
+                                app.message = Some("Editor is vscode; skipping auto-compile.".to_string());
+                            }
                         }
                         (Some(project_dir), Some(WorkflowState::WaitingForMindmapProject { tui_dir })) => {
                             let script = tui_dir.join("tui").join("latex-to-mindmap-portable.sh");
@@ -546,14 +621,15 @@ fn main() -> io::Result<()> {
                                 let _ = fs::create_dir_all(&project_dir);
                                 let src = templates_dir.join("main.tex");
                                 if src.exists() { let _ = fs::copy(&src, project_dir.join("main.tex")); }
-                                disable_raw_mode()?;
-                                execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-                                let _ = Command::new("nvim").arg("main.tex").current_dir(&project_dir).status();
-                                enable_raw_mode()?;
-                                execute!(terminal.backend_mut(), EnterAlternateScreen)?;
-                                terminal.clear()?;
-                                app.pending_pdf = Some(project_dir.join(".build").join("main.pdf"));
-                                app.popup = Some(launch_compile(project_dir));
+                                if let Err(e) = open_editor_in_project(&cfg.editor, &project_dir, &mut terminal) {
+                                    app.message = Some(format!("Failed to launch editor: {}", e));
+                                }
+                                if should_auto_compile(&cfg.editor) {
+                                    app.pending_pdf = Some(project_dir.join(".build").join("main.pdf"));
+                                    app.popup = Some(launch_compile(project_dir));
+                                } else {
+                                    app.message = Some("Editor is vscode; skipping auto-compile.".to_string());
+                                }
                             }
                             Some(WorkflowState::WaitingForTemplateName { template_path, projects_dir }) => {
                                 let project_dir = projects_dir.join(&name);
@@ -576,14 +652,34 @@ fn main() -> io::Result<()> {
                                         project_dir.to_str().unwrap_or("."),
                                     ])
                                     .status();
-                                disable_raw_mode()?;
-                                execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-                                let _ = Command::new("nvim").arg("main.tex").current_dir(&project_dir).status();
-                                enable_raw_mode()?;
-                                execute!(terminal.backend_mut(), EnterAlternateScreen)?;
-                                terminal.clear()?;
-                                app.pending_pdf = Some(project_dir.join(".build").join("main.pdf"));
-                                app.popup = Some(launch_compile(project_dir));
+                                if let Err(e) = open_editor_in_project(&cfg.editor, &project_dir, &mut terminal) {
+                                    app.message = Some(format!("Failed to launch editor: {}", e));
+                                }
+                                if should_auto_compile(&cfg.editor) {
+                                    app.pending_pdf = Some(project_dir.join(".build").join("main.pdf"));
+                                    app.popup = Some(launch_compile(project_dir));
+                                } else {
+                                    app.message = Some("Editor is vscode; skipping auto-compile.".to_string());
+                                }
+                            }
+                            Some(WorkflowState::WaitingForEditorChoice) => {
+                                let choice = name.to_lowercase();
+                                let normalized = match choice.as_str() {
+                                    "nvim" => Some("nvim"),
+                                    "vscode" | "code" => Some("vscode"),
+                                    _ => None,
+                                };
+
+                                if let Some(editor) = normalized {
+                                    cfg.editor = editor.to_string();
+                                    if let Err(e) = config::save_editor(&cfg.editor) {
+                                        app.message = Some(format!("Failed to save editor: {}", e));
+                                    } else {
+                                        app.message = Some(format!("Editor set to {}", cfg.editor));
+                                    }
+                                } else {
+                                    app.message = Some("Editor must be 'nvim' or 'vscode'.".to_string());
+                                }
                             }
                             _ => {}
                         }
@@ -636,6 +732,16 @@ fn main() -> io::Result<()> {
                         } else {
                             app.workflow = Some(WorkflowState::WaitingForMindmapProject { tui_dir });
                             app.popup = Some(PopupState::new_dir_browser("Select a project to convert:", &projects_dir));
+                        }
+                    }
+                    menu::Action::SetEditor => {
+                        app.workflow = Some(WorkflowState::WaitingForEditorChoice);
+                        app.popup = Some(PopupState::new_text_input("Editor (nvim|vscode):"));
+                    }
+                    menu::Action::EditConfig => {
+                        let path = config::config_path();
+                        if let Err(e) = open_file_in_editor(&cfg.editor, &path, &mut terminal) {
+                            app.message = Some(format!("Failed to open config: {}", e));
                         }
                     }
                 },

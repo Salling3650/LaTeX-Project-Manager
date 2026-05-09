@@ -43,6 +43,7 @@ use std::path::PathBuf;
 #[allow(dead_code)]
 pub enum Action {
     Quit,
+    SetEditor,
     /// Run a long command and stream its output into a popup window.
     LaunchOutput { title: String, program: String, args: Vec<String>, dir: Option<PathBuf> },
     /// Hand the terminal to an interactive program (e.g. nvim), return on exit.
@@ -57,6 +58,7 @@ pub enum Action {
     OpenLatexProject { projects_dir: PathBuf },
     /// Browse projects/, select one, convert to mindmap HTML.
     ConvertToMindmap { projects_dir: PathBuf, tui_dir: PathBuf },
+    EditConfig,
 }
 
 // ── A single menu entry ───────────────────────────────────────────────────────
@@ -119,10 +121,19 @@ pub const ITEMS: &[MenuItem] = &[
     },
 
     MenuItem {
+        label: "Set editor",
+        action: |_| Action::SetEditor,
+    },
+
+    MenuItem {
+        label: "Edit tui.conf",
+        action: |_| Action::EditConfig,
+    },
+
+    MenuItem {
         label: "Exit",
         action: |_| Action::Quit,
     },
-
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────

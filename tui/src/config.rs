@@ -2,6 +2,7 @@ use ratatui::style::Color;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
+use std::io;
 use std::path::PathBuf;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -13,6 +14,7 @@ pub struct Config {
     pub footer_color:   Color,
     pub workspace_root: PathBuf,
     pub pdf_viewer:     String,
+    pub editor:         String,
 }
 
 impl Default for Config {
@@ -22,6 +24,7 @@ impl Default for Config {
             footer_color:   Color::DarkGray,
             workspace_root: find_workspace_root(),
             pdf_viewer:     "tdf".to_string(),
+            editor:         "nvim".to_string(),
         }
     }
 }
@@ -52,6 +55,24 @@ pub fn find_workspace_root() -> PathBuf {
     env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
+fn find_workspace_root_from_exe() -> PathBuf {
+    if let Ok(exe) = env::current_exe() {
+        let exe = fs::canonicalize(&exe).unwrap_or(exe);
+        let mut dir = exe.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
+        for _ in 0..6 {
+            if dir.join("templates").is_dir() {
+                return dir;
+            }
+            match dir.parent() {
+                Some(p) => dir = p.to_path_buf(),
+                None => break,
+            }
+        }
+    }
+
+    find_workspace_root()
+}
+
 fn name_to_color(s: &str) -> Option<Color> {
     match s.to_lowercase().as_str() {
         "black"          => Some(Color::Black),
@@ -74,18 +95,14 @@ fn name_to_color(s: &str) -> Option<Color> {
     }
 }
 
-fn conf_path() -> PathBuf {
-    // Look next to the binary first, then fall back to cwd
-    if let Ok(exe) = env::current_exe() {
-        let candidate = exe.parent().unwrap_or(&exe).join("tui.conf");
-        if candidate.exists() { return candidate; }
-    }
-    PathBuf::from("tui.conf")
+pub fn config_path() -> PathBuf {
+    let root = find_workspace_root_from_exe();
+    root.join("tui").join("tui.conf")
 }
 
 pub fn load() -> Config {
     let mut cfg = Config::default();
-    let path = conf_path();
+    let path = config_path();
     let text = match fs::read_to_string(&path) {
         Ok(t) => t,
         Err(_) => return cfg, // config is optional
@@ -118,6 +135,10 @@ pub fn load() -> Config {
         cfg.pdf_viewer = v.clone();
     }
 
+    if let Some(v) = pairs.get("editor") {
+        cfg.editor = v.clone();
+    }
+
     if let Some(v) = pairs.get("workspace_root") {
         let p = PathBuf::from(v);
         if p.is_dir() {
@@ -126,4 +147,43 @@ pub fn load() -> Config {
     }
 
     cfg
+}
+
+fn upsert_key(text: &str, key: &str, value: &str) -> String {
+    let mut found = false;
+    let mut out: Vec<String> = Vec::new();
+
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with('#') {
+            if let Some((k, _)) = trimmed.split_once('=') {
+                if k.trim().eq_ignore_ascii_case(key) {
+                    out.push(format!("{} = {}", key, value));
+                    found = true;
+                    continue;
+                }
+            }
+        }
+        out.push(line.to_string());
+    }
+
+    if !found {
+        if !out.is_empty() {
+            out.push(String::new());
+        }
+        out.push(format!("{} = {}", key, value));
+    }
+
+    let mut result = out.join("\n");
+    if text.ends_with('\n') {
+        result.push('\n');
+    }
+    result
+}
+
+pub fn save_editor(editor: &str) -> io::Result<()> {
+    let path = config_path();
+    let text = fs::read_to_string(&path).unwrap_or_default();
+    let updated = upsert_key(&text, "editor", editor);
+    fs::write(path, updated)
 }

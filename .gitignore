@@ -4,9 +4,14 @@
 .AppleDouble
 .LSOverride
 
-# Templates – keep only main.tex template
+# Templates – keep main.tex and test templates (Lille/Stor opgave)
 templates/*
 !templates/main.tex
+!templates/Lille\ opgave/
+!templates/Lille\ opgave/**
+!templates/Stor\ opgave/
+!templates/Stor\ opgave/**
+templates/**/.DS_Store
 
 # Projects directory (user-created projects)
 projects/*
@@ -23,4 +28,3 @@ projects/*
 *.out
 missfont.log
 *.pdf
-

@@ -710,8 +710,14 @@ fn main() -> io::Result<()> {
                         terminal.clear()?;
                     }
                     menu::Action::RevealInFinder { path } => {
-                        let _ = Command::new("open").arg(&path).spawn();
-                        app.message = Some("Opened in Finder".to_string());
+                        // Write the path to a temp file for the shell to source
+                        let cmd_file = std::path::PathBuf::from("/tmp/lx_cd");
+                        let cd_cmd = format!("cd '{}'", path.display());
+                        let _ = fs::write(&cmd_file, cd_cmd);
+                        let msg = format!("Exiting to: {}", path.display());
+                        app.message = Some(msg);
+                        // Signal to exit
+                        return Ok(());
                     }
                     menu::Action::CreateBlankProject { templates_dir, projects_dir } => {
                         app.workflow = Some(WorkflowState::WaitingForBlankName { templates_dir, projects_dir });

@@ -231,16 +231,14 @@ fn prepare_build_dir(project_dir: &std::path::Path) {
 }
 
 /// Prepare the build directory then spawn a compile output popup.
-fn launch_compile(project_dir: PathBuf) -> PopupState {
+fn launch_compile(project_dir: PathBuf, compiler: &str) -> PopupState {
     prepare_build_dir(&project_dir);
-    let texinputs = format!(".:./Config//:{}", env::var("TEXINPUTS").unwrap_or_default());
-    // Use `'...'` quoting; escape any literal single-quotes in the path
-    let safe_ti = texinputs.replace('\'', "'\\''");
-    // Run pdflatex twice so refs/TOC are resolved
+    // Run the compiler twice so refs/TOC are resolved.
+    // Don't force TEXINPUTS — let TeX use system defaults which work better on all platforms.
     let script = format!(
-        "TEXINPUTS='{ti}' /Library/TeX/texbin/pdflatex -interaction=nonstopmode -output-directory=.build main.tex && \
-         TEXINPUTS='{ti}' /Library/TeX/texbin/pdflatex -interaction=nonstopmode -output-directory=.build main.tex",
-        ti = safe_ti
+        "{compiler} -interaction=nonstopmode -output-directory=.build main.tex 2>&1 && \
+         {compiler} -interaction=nonstopmode -output-directory=.build main.tex",
+        compiler = compiler
     );
     let shell_args = ["-c", script.as_str()];
     PopupState::new_output("Compiling", "sh", &shell_args, Some(project_dir))
@@ -534,14 +532,23 @@ fn main() -> io::Result<()> {
                             if pdf.exists() {
                                 disable_raw_mode()?;
                                 execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-                                let mut parts = cfg.pdf_viewer.split_whitespace();
-                                let ok = if let Some(prog) = parts.next() {
-                                    Command::new(prog).args(parts).arg(&pdf).status()
-                                        .map(|s| s.success()).unwrap_or(false)
-                                } else { false };
+                                
+                                // Try pdf_viewer command (supports shell aliases/commands)
+                                let pdf_path = pdf.to_str().unwrap_or(".");
+                                let ok = Command::new("sh")
+                                    .arg("-c")
+                                    .arg(format!("{} \"{}\"", cfg.pdf_viewer, pdf_path))
+                                    .status()
+                                    .map(|s| s.success())
+                                    .unwrap_or(false);
+                                
                                 if !ok {
-                                    let _ = Command::new("open").arg(&pdf).status();
+                                    app.message = Some(format!(
+                                        "Could not open PDF with '{}'. Check tui.conf pdf_viewer setting.",
+                                        cfg.pdf_viewer
+                                    ));
                                 }
+                                
                                 enable_raw_mode()?;
                                 execute!(terminal.backend_mut(), EnterAlternateScreen)?;
                                 terminal.clear()?;
@@ -583,7 +590,7 @@ fn main() -> io::Result<()> {
                             }
                             if should_auto_compile(&cfg.editor) {
                                 app.pending_pdf = Some(project_dir.join(".build").join("main.pdf"));
-                                app.popup = Some(launch_compile(project_dir));
+                                app.popup = Some(launch_compile(project_dir, &cfg.latex_compiler));
                             } else {
                                 app.message = Some("Editor is vscode; skipping auto-compile.".to_string());
                             }
@@ -626,7 +633,7 @@ fn main() -> io::Result<()> {
                                 }
                                 if should_auto_compile(&cfg.editor) {
                                     app.pending_pdf = Some(project_dir.join(".build").join("main.pdf"));
-                                    app.popup = Some(launch_compile(project_dir));
+                                    app.popup = Some(launch_compile(project_dir, &cfg.latex_compiler));
                                 } else {
                                     app.message = Some("Editor is vscode; skipping auto-compile.".to_string());
                                 }
@@ -657,7 +664,7 @@ fn main() -> io::Result<()> {
                                 }
                                 if should_auto_compile(&cfg.editor) {
                                     app.pending_pdf = Some(project_dir.join(".build").join("main.pdf"));
-                                    app.popup = Some(launch_compile(project_dir));
+                                    app.popup = Some(launch_compile(project_dir, &cfg.latex_compiler));
                                 } else {
                                     app.message = Some("Editor is vscode; skipping auto-compile.".to_string());
                                 }

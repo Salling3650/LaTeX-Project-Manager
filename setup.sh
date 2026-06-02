@@ -165,7 +165,7 @@ install_dependencies_linux() {
             fi
             ;;
 
-        arch)
+        arch|archarm)
             if ! command_exists cargo; then
                 to_install+=("rustup")
             fi

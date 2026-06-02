@@ -1,15 +1,14 @@
 # macOS
 .DS_Store
 **/.DS_Store
+.AppleDouble
+.LSOverride
 
-# Templates – ignore everything except main.tex and whitelisted folders
+# Templates – keep only main.tex template
 templates/*
 !templates/main.tex
-# To track a specific template folder, add two lines like these:
-# !templates/My Template/
-# !templates/My Template/**
 
-# Templates – ignore everything except .gitkeep
+# Projects directory (user-created projects)
 projects/*
 !projects/.gitkeep
 
@@ -24,3 +23,4 @@ projects/*
 *.out
 missfont.log
 *.pdf
+

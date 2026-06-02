@@ -15,6 +15,7 @@ pub struct Config {
     pub workspace_root: PathBuf,
     pub pdf_viewer:     String,
     pub editor:         String,
+    pub latex_compiler: String,
 }
 
 impl Default for Config {
@@ -25,6 +26,7 @@ impl Default for Config {
             workspace_root: find_workspace_root(),
             pdf_viewer:     "tdf".to_string(),
             editor:         "nvim".to_string(),
+            latex_compiler: "pdflatex".to_string(),
         }
     }
 }
@@ -137,6 +139,10 @@ pub fn load() -> Config {
 
     if let Some(v) = pairs.get("editor") {
         cfg.editor = v.clone();
+    }
+
+    if let Some(v) = pairs.get("latex_compiler") {
+        cfg.latex_compiler = v.clone();
     }
 
     if let Some(v) = pairs.get("workspace_root") {

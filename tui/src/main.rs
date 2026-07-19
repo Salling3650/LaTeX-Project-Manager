@@ -413,7 +413,7 @@ fn main() -> io::Result<()> {
             let footer_text = if let Some(ref msg) = app.message {
                 msg.clone()
             } else {
-                "↑↓ navigate  |  Enter select  |  q quit".to_string()
+                "↑↓ or j/k to navigate  |  Enter select  |  q quit".to_string()
             };
             let footer = Paragraph::new(footer_text)
                 .alignment(Alignment::Center)
@@ -429,7 +429,7 @@ fn main() -> io::Result<()> {
                         f.render_widget(Clear, popup_area);
                         let items: Vec<ListItem> = popup.items.iter()
                             .map(|i| ListItem::new(i.as_str())).collect();
-                        let hint = "\u{2191}\u{2193} navigate  \u{23ce} select  Esc cancel";
+                        let hint = "\u{2191}\u{2193} or j/k to navigate  \u{23ce} select  Esc cancel";                        
                         let list = List::new(items)
                             .block(Block::default()
                                 .title(format!(" {}  ({}) ", popup.title, hint))
@@ -486,10 +486,10 @@ fn main() -> io::Result<()> {
         let action: Option<Action> = if let Some(ref popup) = app.popup {
             match popup.kind {
                 PopupKind::DirBrowser => match key.code {
-                    KeyCode::Up    => Some(Action::BrowserPrev),
-                    KeyCode::Down  => Some(Action::BrowserNext),
-                    KeyCode::Esc   => Some(Action::ClosePopup),
-                    KeyCode::Enter => Some(Action::DirBrowserConfirm),
+                    KeyCode::Up     | KeyCode::Char('k') => Some(Action::BrowserPrev),
+                    KeyCode::Down   | KeyCode::Char('j') => Some(Action::BrowserNext),
+                    KeyCode::Esc                         => Some(Action::ClosePopup),
+                    KeyCode::Enter                       => Some(Action::DirBrowserConfirm),
                     _ => None,
                 },
                 PopupKind::TextInput => match key.code {
@@ -500,16 +500,16 @@ fn main() -> io::Result<()> {
                     _ => None,
                 },
                 PopupKind::Output => match key.code {
-                    KeyCode::Up   => Some(Action::OutputScrollUp),
-                    KeyCode::Down => Some(Action::OutputScrollDown),
+                    KeyCode::Up   | KeyCode::Char('k') => Some(Action::OutputScrollUp),
+                    KeyCode::Down | KeyCode::Char('j') => Some(Action::OutputScrollDown),
                     KeyCode::Esc if popup.done => Some(Action::ClosePopup),
                     _ => None,
                 },
             }
         } else {
             match key.code {
-                KeyCode::Up            => Some(Action::MainPrev),
-                KeyCode::Down          => Some(Action::MainNext),
+                KeyCode::Up     | KeyCode::Char('k')    => Some(Action::MainPrev),
+                KeyCode::Down   | KeyCode::Char('j')    => Some(Action::MainNext),
                 KeyCode::Char('q') | KeyCode::Esc => Some(Action::Quit),
                 KeyCode::Enter => {
                     let idx = app.list_state.selected().unwrap_or(0);

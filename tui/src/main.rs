@@ -230,6 +230,38 @@ fn prepare_build_dir(project_dir: &std::path::Path) {
     }
 }
 
+/// Copy a directory recursively, excluding certain files and extensions.
+fn copy_dir_filtered(src: &std::path::Path, dst: &std::path::Path) -> io::Result<()> {
+    const EXCLUDE_NAMES: &[&str] = &[".build", "missfont.log", "main.pdf"];
+    const EXCLUDE_EXTS: &[&str] = &["aux", "log", "fdb_latexmk", "fls", "synctex.gz", "toc", "out"];
+
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy();
+
+        if EXCLUDE_NAMES.contains(&name.as_ref()) {
+            continue;
+        }
+        if let Some(ext) = std::path::Path::new(name.as_ref()).extension() {
+            if EXCLUDE_EXTS.contains(&ext.to_string_lossy().as_ref()) {
+                continue;
+            }
+        }
+
+        let src_path = entry.path();
+        let dst_path = dst.join(&file_name);
+        let ty = entry.file_type()?;
+        if ty.is_dir() {
+            copy_dir_filtered(&src_path, &dst_path)?;
+        } else if ty.is_file() {
+            fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
 /// Prepare the build directory then spawn a compile output popup.
 fn launch_compile(project_dir: PathBuf, compiler: &str) -> PopupState {
     prepare_build_dir(&project_dir);
@@ -263,17 +295,20 @@ fn open_editor_in_project(
         cmd
     };
     cmd.current_dir(project_dir);
-    let status = cmd.status()?;
+    let status = cmd.status();
+
+    // Always restore the terminal, even if the editor errored or exited non-zero.
+    enable_raw_mode()?;
+    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+    terminal.clear()?;
+
+    let status = status?;
     if !status.success() {
         return Err(io::Error::new(
             io::ErrorKind::Other,
             format!("Editor exited with status {}", status),
         ));
     }
-
-    enable_raw_mode()?;
-    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
-    terminal.clear()?;
     Ok(())
 }
 
@@ -299,22 +334,21 @@ fn open_file_in_editor(
     if let Some(parent) = file_path.parent() {
         cmd.current_dir(parent);
     }
-    let status = cmd.status()?;
+    let status = cmd.status();
+
+    // Always restore the terminal, even if the editor errored or exited non-zero.
+    enable_raw_mode()?;
+    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+    terminal.clear()?;
+
+    let status = status?;
     if !status.success() {
         return Err(io::Error::new(
             io::ErrorKind::Other,
             format!("Editor exited with status {}", status),
         ));
     }
-
-    enable_raw_mode()?;
-    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
-    terminal.clear()?;
     Ok(())
-}
-
-fn should_auto_compile(editor: &str) -> bool {
-    editor.trim().eq_ignore_ascii_case("nvim")
 }
 
 fn main() -> io::Result<()> {
@@ -588,11 +622,11 @@ fn main() -> io::Result<()> {
                             if let Err(e) = open_editor_in_project(&cfg.editor, &project_dir, &mut terminal) {
                                 app.message = Some(format!("Failed to launch editor: {}", e));
                             }
-                            if should_auto_compile(&cfg.editor) {
+                            if cfg.auto_compile {
                                 app.pending_pdf = Some(project_dir.join(".build").join("main.pdf"));
                                 app.popup = Some(launch_compile(project_dir, &cfg.latex_compiler));
                             } else {
-                                app.message = Some("Editor is vscode; skipping auto-compile.".to_string());
+                                app.message = Some("Auto-compile disabled.".to_string());
                             }
                         }
                         (Some(project_dir), Some(WorkflowState::WaitingForMindmapProject { tui_dir })) => {
@@ -631,42 +665,27 @@ fn main() -> io::Result<()> {
                                 if let Err(e) = open_editor_in_project(&cfg.editor, &project_dir, &mut terminal) {
                                     app.message = Some(format!("Failed to launch editor: {}", e));
                                 }
-                                if should_auto_compile(&cfg.editor) {
+                                if cfg.auto_compile {
                                     app.pending_pdf = Some(project_dir.join(".build").join("main.pdf"));
                                     app.popup = Some(launch_compile(project_dir, &cfg.latex_compiler));
                                 } else {
-                                    app.message = Some("Editor is vscode; skipping auto-compile.".to_string());
+                                    app.message = Some("Auto-compile disabled.".to_string());
                                 }
                             }
                             Some(WorkflowState::WaitingForTemplateName { template_path, projects_dir }) => {
                                 let project_dir = projects_dir.join(&name);
                                 let _ = fs::create_dir_all(&project_dir);
-                                let src = format!("{}/", template_path.display());
-                                let _ = Command::new("rsync")
-                                    .args([
-                                        "-a",
-                                        "--exclude=.build",
-                                        "--exclude=*.aux",
-                                        "--exclude=*.log",
-                                        "--exclude=*.fdb_latexmk",
-                                        "--exclude=*.fls",
-                                        "--exclude=*.synctex.gz",
-                                        "--exclude=*.toc",
-                                        "--exclude=*.out",
-                                        "--exclude=missfont.log",
-                                        "--exclude=main.pdf",
-                                        &src,
-                                        project_dir.to_str().unwrap_or("."),
-                                    ])
-                                    .status();
+                                if let Err(e) = copy_dir_filtered(&template_path, &project_dir) {
+                                    app.message = Some(format!("Failed to copy template: {}", e));
+                                }
                                 if let Err(e) = open_editor_in_project(&cfg.editor, &project_dir, &mut terminal) {
                                     app.message = Some(format!("Failed to launch editor: {}", e));
                                 }
-                                if should_auto_compile(&cfg.editor) {
+                                if cfg.auto_compile {
                                     app.pending_pdf = Some(project_dir.join(".build").join("main.pdf"));
                                     app.popup = Some(launch_compile(project_dir, &cfg.latex_compiler));
                                 } else {
-                                    app.message = Some("Editor is vscode; skipping auto-compile.".to_string());
+                                    app.message = Some("Auto-compile disabled.".to_string());
                                 }
                             }
                             Some(WorkflowState::WaitingForEditorChoice) => {
@@ -714,9 +733,11 @@ fn main() -> io::Result<()> {
                         let cmd_file = std::path::PathBuf::from("/tmp/lx_cd");
                         let cd_cmd = format!("cd '{}'", path.display());
                         let _ = fs::write(&cmd_file, cd_cmd);
-                        let msg = format!("Exiting to: {}", path.display());
-                        app.message = Some(msg);
-                        // Signal to exit
+                        // Restore the terminal before exiting — skipping this
+                        // leaves raw mode / the alternate screen active and
+                        // corrupts the shell prompt on return.
+                        disable_raw_mode()?;
+                        execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
                         return Ok(());
                     }
                     menu::Action::CreateBlankProject { templates_dir, projects_dir } => {

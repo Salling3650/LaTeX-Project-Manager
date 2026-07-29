@@ -16,6 +16,7 @@ pub struct Config {
     pub pdf_viewer:     String,
     pub editor:         String,
     pub latex_compiler: String,
+    pub auto_compile:   bool,
 }
 
 impl Default for Config {
@@ -27,6 +28,7 @@ impl Default for Config {
             pdf_viewer:     "tdf".to_string(),
             editor:         "nvim".to_string(),
             latex_compiler: "pdflatex".to_string(),
+            auto_compile:   true,
         }
     }
 }
@@ -150,6 +152,9 @@ pub fn load() -> Config {
         if p.is_dir() {
             cfg.workspace_root = p;
         }
+    }
+    if let Some(v) = pairs.get("auto_compile") {
+        cfg.auto_compile = v.eq_ignore_ascii_case("true");
     }
 
     cfg

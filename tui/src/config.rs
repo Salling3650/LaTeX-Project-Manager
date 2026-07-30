@@ -77,6 +77,21 @@ fn find_workspace_root_from_exe() -> PathBuf {
     find_workspace_root()
 }
 
+/// Expand a leading `~` or `~/...` to the user's home directory.
+/// `PathBuf::from` treats `~` as a literal character, so without this,
+/// any `workspace_root` value starting with `~` silently fails the
+/// `is_dir()` check below and gets ignored.
+fn expand_tilde(path: &str) -> PathBuf {
+    if let Some(rest) = path.strip_prefix('~') {
+        if rest.is_empty() || rest.starts_with('/') {
+            if let Ok(home) = env::var("HOME") {
+                return PathBuf::from(home).join(rest.trim_start_matches('/'));
+            }
+        }
+    }
+    PathBuf::from(path)
+}
+
 fn name_to_color(s: &str) -> Option<Color> {
     match s.to_lowercase().as_str() {
         "black"          => Some(Color::Black),
@@ -147,14 +162,15 @@ pub fn load() -> Config {
         cfg.latex_compiler = v.clone();
     }
 
+    if let Some(v) = pairs.get("auto_compile") {
+        cfg.auto_compile = v.eq_ignore_ascii_case("true");
+    }
+
     if let Some(v) = pairs.get("workspace_root") {
-        let p = PathBuf::from(v);
+        let p = expand_tilde(v);
         if p.is_dir() {
             cfg.workspace_root = p;
         }
-    }
-    if let Some(v) = pairs.get("auto_compile") {
-        cfg.auto_compile = v.eq_ignore_ascii_case("true");
     }
 
     cfg

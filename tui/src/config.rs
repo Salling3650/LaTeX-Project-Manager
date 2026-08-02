@@ -9,10 +9,19 @@ use std::path::PathBuf;
 // Parsed configuration loaded from tui.conf at startup
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// A single project workspace root: a directory that new/existing LaTeX
+/// projects live under, plus a display label shown in the browser.
+#[derive(Clone)]
+pub struct ProjectRoot {
+    pub label: String,
+    pub path:  PathBuf,
+}
+
 pub struct Config {
     pub accent_color:   Color,
     pub footer_color:   Color,
     pub workspace_root: PathBuf,
+    pub project_roots:  Vec<ProjectRoot>,
     pub pdf_viewer:     String,
     pub editor:         String,
     pub latex_compiler: String,
@@ -21,16 +30,53 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
+        let workspace_root = find_workspace_root();
+        let project_roots = build_project_roots(&workspace_root, Vec::new());
         Config {
             accent_color:   Color::Cyan,
             footer_color:   Color::DarkGray,
-            workspace_root: find_workspace_root(),
+            workspace_root,
+            project_roots,
             pdf_viewer:     "tdf".to_string(),
             editor:         "nvim".to_string(),
             latex_compiler: "pdflatex".to_string(),
             auto_compile:   true,
         }
     }
+}
+
+/// Build the final list of project roots: the default `<workspace_root>/projects`
+/// (labelled after the workspace folder's name) plus any extra roots the user
+/// configured via `project_root = ...` lines. Missing directories are created
+/// so the browser never has to special-case a not-yet-existing root.
+fn build_project_roots(workspace_root: &std::path::Path, mut extra: Vec<ProjectRoot>) -> Vec<ProjectRoot> {
+    let default_label = workspace_root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Projects".to_string());
+    let mut roots = vec![ProjectRoot {
+        label: default_label,
+        path:  workspace_root.join("projects"),
+    }];
+    roots.append(&mut extra);
+    for r in &roots {
+        let _ = fs::create_dir_all(&r.path);
+    }
+    roots
+}
+
+/// Parse a `project_root` config value. Accepts either `Label:/path/to/dir`
+/// or a bare `/path/to/dir` (in which case the folder name becomes the label).
+fn parse_project_root(v: &str) -> ProjectRoot {
+    // Guard against splitting on a Windows-style drive letter colon (e.g. "C:\...").
+    if let Some((label, path)) = v.split_once(':') {
+        if path.starts_with('/') || path.starts_with('~') || path.starts_with('.') {
+            return ProjectRoot { label: label.trim().to_string(), path: expand_tilde(path.trim()) };
+        }
+    }
+    let p = expand_tilde(v.trim());
+    let label = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| v.to_string());
+    ProjectRoot { label, path: p }
 }
 
 /// Walk up from CWD and binary location to find the workspace root
@@ -127,6 +173,11 @@ pub fn load() -> Config {
         Err(_) => return cfg, // config is optional
     };
 
+    // `project_root` may appear multiple times (one extra workspace per line),
+    // so it's collected separately instead of going through the single-value
+    // HashMap below, which would silently keep only the last occurrence.
+    let mut extra_roots: Vec<ProjectRoot> = Vec::new();
+
     let pairs: HashMap<String, String> = text
         .lines()
         .filter(|l| !l.trim_start().starts_with('#') && l.contains('='))
@@ -135,6 +186,10 @@ pub fn load() -> Config {
             let k = parts.next()?.trim().to_lowercase();
             // Do NOT lowercase the value — paths are case-sensitive
             let v = parts.next()?.trim().trim_matches('"').to_string();
+            if k == "project_root" {
+                extra_roots.push(parse_project_root(&v));
+                return None;
+            }
             Some((k, v))
         })
         .collect();
@@ -172,6 +227,8 @@ pub fn load() -> Config {
             cfg.workspace_root = p;
         }
     }
+
+    cfg.project_roots = build_project_roots(&cfg.workspace_root, extra_roots);
 
     cfg
 }

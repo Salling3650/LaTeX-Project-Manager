@@ -60,6 +60,20 @@ struct PopupState {
     done: bool,
     rx: Option<Receiver<Option<String>>>,
     input_value: String,
+    // ── Recursive / multi-root project browser state (DirBrowser only) ──────
+    // The configured roots (label, path) this browser can pick from.
+    browse_roots: Vec<(String, PathBuf)>,
+    // Navigation stack of directories we've drilled into. Empty means we're
+    // at the root picker (only shown when there's more than one root).
+    browse_stack: Vec<PathBuf>,
+    // true  = recursive multi-root project browser (drills into folders
+    //         until one directly contains a file, e.g. main.tex)
+    // false = legacy single-level browser (templates, root pickers)
+    browse_leaf_check: bool,
+    // Whether items[0] is a ".." entry (only meaningful when browse_leaf_check).
+    up_entry: bool,
+    // Title without the breadcrumb suffix, so it can be rebuilt on navigation.
+    base_title: String,
 }
 
 impl PopupState {
@@ -100,6 +114,8 @@ impl PopupState {
             items: vec![], paths: vec![], list_state: ls,
             lines: vec![], scroll: 0, done: false, rx: Some(rx),
             input_value: String::new(),
+            browse_roots: vec![], browse_stack: vec![], browse_leaf_check: false,
+            up_entry: false, base_title: title.to_string(),
         }
     }
 
@@ -127,6 +143,9 @@ impl PopupState {
         }
     }
 
+    /// Legacy single-level browser: lists one directory's subfolders, and
+    /// selecting one immediately confirms it. Used for the templates browser
+    /// and for the simple "pick a workspace root" prompt.
     fn new_dir_browser(title: &str, path: &std::path::Path) -> Self {
         let mut entries: Vec<(String, PathBuf)> = fs::read_dir(path)
             .into_iter().flatten().flatten()
@@ -144,6 +163,100 @@ impl PopupState {
             list_state: ls,
             lines: vec![], scroll: 0, done: false, rx: None,
             input_value: String::new(),
+            browse_roots: vec![], browse_stack: vec![], browse_leaf_check: false,
+            up_entry: false, base_title: title.to_string(),
+        }
+    }
+
+    /// Single-level picker over a small list of (label, path) options — used
+    /// to choose which configured workspace root a new project should go in.
+    fn new_root_picker(title: &str, roots: &[config::ProjectRoot]) -> Self {
+        let mut ls = ListState::default();
+        if !roots.is_empty() { ls.select(Some(0)); }
+        PopupState {
+            kind: PopupKind::DirBrowser,
+            title: title.to_string(),
+            items: roots.iter().map(|r| r.label.clone()).collect(),
+            paths: roots.iter().map(|r| r.path.clone()).collect(),
+            list_state: ls,
+            lines: vec![], scroll: 0, done: false, rx: None,
+            input_value: String::new(),
+            browse_roots: vec![], browse_stack: vec![], browse_leaf_check: false,
+            up_entry: false, base_title: title.to_string(),
+        }
+    }
+
+    /// Recursive, multi-root project browser. Starts at the root picker if
+    /// more than one root is configured (or straight inside the single root
+    /// otherwise), and lets the user drill into subfolders. A folder is
+    /// treated as a selectable project once it directly contains a file
+    /// (e.g. main.tex); folders that only contain subfolders are pure
+    /// organisational containers (like a semester or class folder) and are
+    /// drilled into instead of selected.
+    fn new_project_browser(title: &str, roots: Vec<(String, PathBuf)>) -> Self {
+        let mut ps = PopupState {
+            kind: PopupKind::DirBrowser,
+            title: title.to_string(),
+            items: vec![], paths: vec![], list_state: ListState::default(),
+            lines: vec![], scroll: 0, done: false, rx: None,
+            input_value: String::new(),
+            browse_roots: roots,
+            browse_stack: vec![],
+            browse_leaf_check: true,
+            up_entry: false,
+            base_title: title.to_string(),
+        };
+        if ps.browse_roots.len() == 1 {
+            let only = ps.browse_roots[0].1.clone();
+            ps.browse_stack.push(only);
+        }
+        ps.refresh_project_browser();
+        ps
+    }
+
+    /// Recompute items/paths/title for the current position in a recursive
+    /// project browser (either the root picker, or a directory listing).
+    fn refresh_project_browser(&mut self) {
+        self.items.clear();
+        self.paths.clear();
+        self.up_entry = false;
+
+        if self.browse_stack.is_empty() {
+            // Root picker: only reached when more than one root is configured.
+            for (label, _) in &self.browse_roots {
+                self.items.push(label.clone());
+            }
+            self.paths = self.browse_roots.iter().map(|(_, p)| p.clone()).collect();
+            self.title = self.base_title.clone();
+        } else {
+            let cur = self.browse_stack.last().unwrap().clone();
+            let show_up = self.browse_stack.len() > 1 || self.browse_roots.len() > 1;
+            if show_up {
+                self.items.push("..".to_string());
+                self.paths.push(cur.clone()); // placeholder; handled via up_entry, not this path
+                self.up_entry = true;
+            }
+            let mut entries: Vec<(String, PathBuf)> = fs::read_dir(&cur)
+                .into_iter().flatten().flatten()
+                .filter(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
+                .map(|e| (e.file_name().to_string_lossy().into_owned(), e.path()))
+                .collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            for (name, path) in entries {
+                self.items.push(name);
+                self.paths.push(path);
+            }
+
+            let breadcrumb: Vec<String> = self.browse_stack.iter()
+                .map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
+                .collect();
+            self.title = format!("{} [{}]", self.base_title, breadcrumb.join(" / "));
+        }
+
+        if self.items.is_empty() {
+            self.list_state.select(None);
+        } else {
+            self.list_state.select(Some(0));
         }
     }
 
@@ -154,13 +267,26 @@ impl PopupState {
             items: vec![], paths: vec![], list_state: ListState::default(),
             lines: vec![], scroll: 0, done: false, rx: None,
             input_value: String::new(),
+            browse_roots: vec![], browse_stack: vec![], browse_leaf_check: false,
+            up_entry: false, base_title: prompt.to_string(),
         }
     }
 }
 
+/// A directory counts as a selectable "project" (or template) once it
+/// directly contains at least one regular file — e.g. main.tex. Pure
+/// organisational folders (a semester, a class) hold only subfolders and
+/// get drilled into instead.
+fn is_leaf_dir(path: &std::path::Path) -> bool {
+    fs::read_dir(path).into_iter().flatten().flatten()
+        .any(|e| e.file_type().map(|ft| ft.is_file()).unwrap_or(false))
+}
+
 // Tracks multi-step workflows (e.g. prompt → copy → nvim → compile)
 enum WorkflowState {
+    WaitingForBlankRoot    { templates_dir: PathBuf },
     WaitingForBlankName    { templates_dir: PathBuf, projects_dir: PathBuf },
+    WaitingForTemplateRoot { templates_dir: PathBuf },
     WaitingForTemplate     { projects_dir: PathBuf },
     WaitingForTemplateName { template_path: PathBuf, projects_dir: PathBuf },
     WaitingForProject,
@@ -548,7 +674,7 @@ fn main() -> io::Result<()> {
                 KeyCode::Enter => {
                     let idx = app.list_state.selected().unwrap_or(0);
                     menu::ITEMS.get(idx)
-                        .map(|item| Action::MenuAction((item.action)(&cfg.workspace_root)))
+                        .map(|item| Action::MenuAction((item.action)(&cfg)))
                 }
                 _ => None,
             }
@@ -608,37 +734,102 @@ fn main() -> io::Result<()> {
                     }
                 }
                 Action::DirBrowserConfirm => {
-                    let selected = app.popup.as_ref().and_then(|p| {
-                        p.list_state.selected().and_then(|i| p.paths.get(i).cloned())
-                    });
-                    let workflow = app.workflow.take();
-                    app.popup = None;
-                    match (selected, workflow) {
-                        (Some(template_path), Some(WorkflowState::WaitingForTemplate { projects_dir })) => {
-                            app.workflow = Some(WorkflowState::WaitingForTemplateName { template_path, projects_dir });
-                            app.popup = Some(PopupState::new_text_input("Enter project name:"));
-                        }
-                        (Some(project_dir), Some(WorkflowState::WaitingForProject)) => {
-                            if let Err(e) = open_editor_in_project(&cfg.editor, &project_dir, &mut terminal) {
-                                app.message = Some(format!("Failed to launch editor: {}", e));
+                    let recursive = matches!(&app.popup, Some(p) if p.browse_leaf_check);
+
+                    if recursive {
+                        // Recursive multi-root project browser: either navigate
+                        // (root picker → dir → subdir → ...) or, once a directory
+                        // that directly holds files is chosen, finalize the pick.
+                        enum Nav { Navigated, Nothing, Selected(PathBuf) }
+
+                        let nav = {
+                            let popup = app.popup.as_mut().unwrap();
+                            let idx = popup.list_state.selected();
+                            match idx {
+                                Some(0) if popup.up_entry => {
+                                    if popup.browse_stack.len() > 1 { popup.browse_stack.pop(); }
+                                    else { popup.browse_stack.clear(); }
+                                    popup.refresh_project_browser();
+                                    Nav::Navigated
+                                }
+                                Some(i) if popup.browse_stack.is_empty() => {
+                                    match popup.browse_roots.get(i).map(|(_, p)| p.clone()) {
+                                        Some(root_path) => {
+                                            popup.browse_stack.push(root_path);
+                                            popup.refresh_project_browser();
+                                            Nav::Navigated
+                                        }
+                                        None => Nav::Nothing,
+                                    }
+                                }
+                                Some(i) => {
+                                    match popup.paths.get(i).cloned() {
+                                        Some(chosen) if is_leaf_dir(&chosen) => Nav::Selected(chosen),
+                                        Some(chosen) => {
+                                            popup.browse_stack.push(chosen);
+                                            popup.refresh_project_browser();
+                                            Nav::Navigated
+                                        }
+                                        None => Nav::Nothing,
+                                    }
+                                }
+                                None => Nav::Nothing,
                             }
-                            if cfg.auto_compile {
-                                app.pending_pdf = Some(project_dir.join(".build").join("main.pdf"));
-                                app.popup = Some(launch_compile(project_dir, &cfg.latex_compiler));
-                            } else {
-                                app.message = Some("Auto-compile disabled.".to_string());
+                        };
+
+                        match nav {
+                            Nav::Navigated => {}
+                            Nav::Nothing => { app.message = Some("Nothing selected.".to_string()); }
+                            Nav::Selected(project_dir) => {
+                                app.popup = None;
+                                match app.workflow.take() {
+                                    Some(WorkflowState::WaitingForProject) => {
+                                        if let Err(e) = open_editor_in_project(&cfg.editor, &project_dir, &mut terminal) {
+                                            app.message = Some(format!("Failed to launch editor: {}", e));
+                                        }
+                                        if cfg.auto_compile {
+                                            app.pending_pdf = Some(project_dir.join(".build").join("main.pdf"));
+                                            app.popup = Some(launch_compile(project_dir, &cfg.latex_compiler));
+                                        } else {
+                                            app.message = Some("Auto-compile disabled.".to_string());
+                                        }
+                                    }
+                                    Some(WorkflowState::WaitingForMindmapProject { tui_dir }) => {
+                                        let script = tui_dir.join("tui").join("latex-to-mindmap-portable.sh");
+                                        app.popup = Some(PopupState::new_output(
+                                            "Converting to mindmap",
+                                            "bash",
+                                            &[script.to_str().unwrap_or("."), project_dir.to_str().unwrap_or(".")],
+                                            None,
+                                        ));
+                                    }
+                                    _ => { app.message = Some("Nothing selected.".to_string()); }
+                                }
                             }
                         }
-                        (Some(project_dir), Some(WorkflowState::WaitingForMindmapProject { tui_dir })) => {
-                            let script = tui_dir.join("tui").join("latex-to-mindmap-portable.sh");
-                            app.popup = Some(PopupState::new_output(
-                                "Converting to mindmap",
-                                "bash",
-                                &[script.to_str().unwrap_or("."), project_dir.to_str().unwrap_or(".")],
-                                None,
-                            ));
+                    } else {
+                        // Legacy single-level browser: templates list, or a
+                        // "pick a workspace root" step for creation flows.
+                        let selected = app.popup.as_ref().and_then(|p| {
+                            p.list_state.selected().and_then(|i| p.paths.get(i).cloned())
+                        });
+                        let workflow = app.workflow.take();
+                        app.popup = None;
+                        match (selected, workflow) {
+                            (Some(root_path), Some(WorkflowState::WaitingForBlankRoot { templates_dir })) => {
+                                app.workflow = Some(WorkflowState::WaitingForBlankName { templates_dir, projects_dir: root_path });
+                                app.popup = Some(PopupState::new_text_input("Enter project name:"));
+                            }
+                            (Some(root_path), Some(WorkflowState::WaitingForTemplateRoot { templates_dir })) => {
+                                app.workflow = Some(WorkflowState::WaitingForTemplate { projects_dir: root_path });
+                                app.popup = Some(PopupState::new_dir_browser("Select a template:", &templates_dir));
+                            }
+                            (Some(template_path), Some(WorkflowState::WaitingForTemplate { projects_dir })) => {
+                                app.workflow = Some(WorkflowState::WaitingForTemplateName { template_path, projects_dir });
+                                app.popup = Some(PopupState::new_text_input("Enter project name:"));
+                            }
+                            _ => { app.message = Some("Nothing selected.".to_string()); }
                         }
-                        _ => { app.message = Some("Nothing selected.".to_string()); }
                     }
                 }
                 Action::TextInputChar(c) => {
@@ -740,32 +931,48 @@ fn main() -> io::Result<()> {
                         execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
                         return Ok(());
                     }
-                    menu::Action::CreateBlankProject { templates_dir, projects_dir } => {
-                        app.workflow = Some(WorkflowState::WaitingForBlankName { templates_dir, projects_dir });
-                        app.popup = Some(PopupState::new_text_input("Enter project name:"));
+                    menu::Action::CreateBlankProject { templates_dir, projects_roots } => {
+                        if projects_roots.len() <= 1 {
+                            let projects_dir = projects_roots.get(0)
+                                .map(|r| r.path.clone())
+                                .unwrap_or_else(|| cfg.workspace_root.join("projects"));
+                            app.workflow = Some(WorkflowState::WaitingForBlankName { templates_dir, projects_dir });
+                            app.popup = Some(PopupState::new_text_input("Enter project name:"));
+                        } else {
+                            app.workflow = Some(WorkflowState::WaitingForBlankRoot { templates_dir });
+                            app.popup = Some(PopupState::new_root_picker("Select workspace:", &projects_roots));
+                        }
                     }
-                    menu::Action::CreateFromTemplate { templates_dir, projects_dir } => {
+                    menu::Action::CreateFromTemplate { templates_dir, projects_roots } => {
                         if !templates_dir.is_dir() {
                             app.message = Some(format!("Templates dir not found: {}", templates_dir.display()));
-                        } else {
+                        } else if projects_roots.len() <= 1 {
+                            let projects_dir = projects_roots.get(0)
+                                .map(|r| r.path.clone())
+                                .unwrap_or_else(|| cfg.workspace_root.join("projects"));
                             app.workflow = Some(WorkflowState::WaitingForTemplate { projects_dir });
                             app.popup = Some(PopupState::new_dir_browser("Select a template:", &templates_dir));
+                        } else {
+                            app.workflow = Some(WorkflowState::WaitingForTemplateRoot { templates_dir });
+                            app.popup = Some(PopupState::new_root_picker("Select workspace:", &projects_roots));
                         }
                     }
-                    menu::Action::OpenLatexProject { projects_dir } => {
-                        if !projects_dir.is_dir() {
-                            app.message = Some(format!("Projects dir not found: {}", projects_dir.display()));
+                    menu::Action::OpenLatexProject { projects_roots } => {
+                        if projects_roots.is_empty() {
+                            app.message = Some("No project roots configured.".to_string());
                         } else {
                             app.workflow = Some(WorkflowState::WaitingForProject);
-                            app.popup = Some(PopupState::new_dir_browser("Select a project:", &projects_dir));
+                            let roots = projects_roots.iter().map(|r| (r.label.clone(), r.path.clone())).collect();
+                            app.popup = Some(PopupState::new_project_browser("Select a project:", roots));
                         }
                     }
-                    menu::Action::ConvertToMindmap { projects_dir, tui_dir } => {
-                        if !projects_dir.is_dir() {
-                            app.message = Some(format!("Projects dir not found: {}", projects_dir.display()));
+                    menu::Action::ConvertToMindmap { projects_roots, tui_dir } => {
+                        if projects_roots.is_empty() {
+                            app.message = Some("No project roots configured.".to_string());
                         } else {
                             app.workflow = Some(WorkflowState::WaitingForMindmapProject { tui_dir });
-                            app.popup = Some(PopupState::new_dir_browser("Select a project to convert:", &projects_dir));
+                            let roots = projects_roots.iter().map(|r| (r.label.clone(), r.path.clone())).collect();
+                            app.popup = Some(PopupState::new_project_browser("Select a project to convert:", roots));
                         }
                     }
                     menu::Action::SetEditor => {

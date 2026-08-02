@@ -5,18 +5,23 @@
 //
 //  Available actions:
 //
-//    Action::CreateBlankProject { templates_dir, projects_dir }
-//        Prompts for a project name, copies templates/main.tex to
-//        projects/<name>/main.tex, opens nvim, then compiles.
+//    Action::CreateBlankProject { templates_dir, projects_roots }
+//        If more than one project root is configured, prompts to pick one
+//        first. Then prompts for a project name (may include `/` to nest
+//        it, e.g. "2026-Fall/CS301/hw1"), copies templates/main.tex into
+//        <root>/<name>/main.tex, opens the editor, then compiles.
 //
-//    Action::CreateFromTemplate { templates_dir, projects_dir }
-//        Shows a template-folder browser, prompts for a project name,
-//        rsyncs the selected template to projects/<name>/, opens nvim,
-//        then compiles.
+//    Action::CreateFromTemplate { templates_dir, projects_roots }
+//        Same root-picking behaviour as above, then shows a template-folder
+//        browser, prompts for a project name, copies the selected template
+//        to <root>/<name>/, opens the editor, then compiles.
 //
-//    Action::OpenLatexProject { projects_dir }
-//        Shows a project-folder browser, opens the selected project in
-//        nvim, then compiles.
+//    Action::OpenLatexProject { projects_roots }
+//        Shows a recursive, multi-root project browser: pick a root (if
+//        more than one is configured), then drill into subfolders — a
+//        folder is treated as a project once it directly contains files
+//        (e.g. main.tex), otherwise selecting it just descends further.
+//        Opens the chosen project in the editor, then compiles.
 //
 //    Action::RevealInFinder { path }
 //        Opens a folder in macOS Finder.
@@ -30,12 +35,13 @@
 //    Action::Quit
 //        Exits the TUI.
 //
-//    Action::ConvertToMindmap { tui_dir }
-//        Lets the user select a LaTeX project, then converts it to an
-//        interactive mind map HTML file using the portable converter.
+//    Action::ConvertToMindmap { projects_roots, tui_dir }
+//        Same recursive, multi-root browser as OpenLatexProject, then
+//        converts the selected project to an interactive mind map HTML file.
 //
 // ─────────────────────────────────────────────────────────────────────────────
 
+use crate::config::{Config, ProjectRoot};
 use std::path::PathBuf;
 
 // ── The action each menu item triggers ───────────────────────────────────────
@@ -50,14 +56,14 @@ pub enum Action {
     RunInteractive { program: String, args: Vec<String>, dir: Option<PathBuf> },
     /// Open a folder in macOS Finder.
     RevealInFinder { path: PathBuf },
-    /// Prompt for a name, create blank project from templates/main.tex, open nvim.
-    CreateBlankProject { templates_dir: PathBuf, projects_dir: PathBuf },
-    /// Browse templates/, prompt for a name, rsync, open nvim.
-    CreateFromTemplate { templates_dir: PathBuf, projects_dir: PathBuf },
-    /// Browse projects/, open the selected project in nvim.
-    OpenLatexProject { projects_dir: PathBuf },
-    /// Browse projects/, select one, convert to mindmap HTML.
-    ConvertToMindmap { projects_dir: PathBuf, tui_dir: PathBuf },
+    /// Prompt for a name, create blank project from templates/main.tex, open editor.
+    CreateBlankProject { templates_dir: PathBuf, projects_roots: Vec<ProjectRoot> },
+    /// Browse templates/, prompt for a name, copy, open editor.
+    CreateFromTemplate { templates_dir: PathBuf, projects_roots: Vec<ProjectRoot> },
+    /// Recursively browse one or more project roots, open the selected project.
+    OpenLatexProject { projects_roots: Vec<ProjectRoot> },
+    /// Recursively browse one or more project roots, convert selection to mindmap.
+    ConvertToMindmap { projects_roots: Vec<ProjectRoot>, tui_dir: PathBuf },
     EditConfig,
 }
 
@@ -65,7 +71,7 @@ pub enum Action {
 
 pub struct MenuItem {
     pub label: &'static str,
-    pub action: fn(&std::path::Path) -> Action,
+    pub action: fn(&Config) -> Action,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -76,47 +82,47 @@ pub const ITEMS: &[MenuItem] = &[
 
     MenuItem {
         label: "Blank project",
-        action: |root| {
+        action: |cfg| {
             Action::CreateBlankProject {
-                templates_dir: root.join("templates"),
-                projects_dir:  root.join("projects"),
+                templates_dir:  cfg.workspace_root.join("templates"),
+                projects_roots: cfg.project_roots.clone(),
             }
         },
     },
 
     MenuItem {
         label: "Template selector",
-        action: |root| {
+        action: |cfg| {
             Action::CreateFromTemplate {
-                templates_dir: root.join("templates"),
-                projects_dir:  root.join("projects"),
+                templates_dir:  cfg.workspace_root.join("templates"),
+                projects_roots: cfg.project_roots.clone(),
             }
         },
     },
 
     MenuItem {
         label: "Open project",
-        action: |root| {
+        action: |cfg| {
             Action::OpenLatexProject {
-                projects_dir: root.join("projects"),
+                projects_roots: cfg.project_roots.clone(),
             }
         },
     },
 
     MenuItem {
         label: "Convert to mindmap",
-        action: |root| {
+        action: |cfg| {
             Action::ConvertToMindmap {
-                projects_dir: root.join("projects"),
-                tui_dir: root.to_path_buf(),
+                projects_roots: cfg.project_roots.clone(),
+                tui_dir: cfg.workspace_root.clone(),
             }
         },
     },
 
     MenuItem {
         label: "Open project folder",
-        action: |root| Action::RevealInFinder {
-            path: root.to_path_buf(),
+        action: |cfg| Action::RevealInFinder {
+            path: cfg.workspace_root.clone(),
         },
     },
 

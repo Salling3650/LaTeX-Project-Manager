@@ -14,7 +14,7 @@ use std::time::Duration;
 include!(concat!(env!("OUT_DIR"), "/title.rs"));
 
 use crossterm::{
-    event::{self, Event, KeyCode},
+    event::{self, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -47,7 +47,7 @@ fn centered_rect(px: u16, py: u16, r: Rect) -> Rect {
 }
 
 #[derive(PartialEq)]
-enum PopupKind { Output, DirBrowser, TextInput }
+enum PopupKind { Output, DirBrowser, TextInput, Confirm }
 
 struct PopupState {
     kind: PopupKind,
@@ -68,12 +68,19 @@ struct PopupState {
     browse_stack: Vec<PathBuf>,
     // true  = recursive multi-root project browser (drills into folders
     //         until one directly contains a file, e.g. main.tex)
-    // false = legacy single-level browser (templates, root pickers)
+    // false = legacy single-level browser (templates, root pickers, recent)
     browse_leaf_check: bool,
     // Whether items[0] is a ".." entry (only meaningful when browse_leaf_check).
     up_entry: bool,
     // Title without the breadcrumb suffix, so it can be rebuilt on navigation.
     base_title: String,
+    // ── Type-to-filter (DirBrowser only) ─────────────────────────────────────
+    // Typed filter query. `items`/`paths` are the filtered view derived from
+    // `all_items`/`all_paths` (the full, unfiltered listing) every time the
+    // query or the underlying listing changes.
+    filter: String,
+    all_items: Vec<String>,
+    all_paths: Vec<PathBuf>,
 }
 
 impl PopupState {
@@ -116,6 +123,7 @@ impl PopupState {
             input_value: String::new(),
             browse_roots: vec![], browse_stack: vec![], browse_leaf_check: false,
             up_entry: false, base_title: title.to_string(),
+            filter: String::new(), all_items: vec![], all_paths: vec![],
         }
     }
 
@@ -143,9 +151,36 @@ impl PopupState {
         }
     }
 
+    /// Recompute `items`/`paths` (the displayed, selectable list) from
+    /// `all_items`/`all_paths` (the full listing) by applying `filter` as a
+    /// case-insensitive substring match. A leading ".." up-entry, if present,
+    /// is always kept regardless of the filter text.
+    fn apply_filter(&mut self) {
+        let q = self.filter.to_lowercase();
+        self.items.clear();
+        self.paths.clear();
+
+        let start = if self.up_entry && !self.all_items.is_empty() {
+            self.items.push(self.all_items[0].clone());
+            self.paths.push(self.all_paths[0].clone());
+            1
+        } else {
+            0
+        };
+
+        for i in start..self.all_items.len() {
+            if q.is_empty() || self.all_items[i].to_lowercase().contains(&q) {
+                self.items.push(self.all_items[i].clone());
+                self.paths.push(self.all_paths[i].clone());
+            }
+        }
+
+        if self.items.is_empty() { self.list_state.select(None); }
+        else { self.list_state.select(Some(0)); }
+    }
+
     /// Legacy single-level browser: lists one directory's subfolders, and
-    /// selecting one immediately confirms it. Used for the templates browser
-    /// and for the simple "pick a workspace root" prompt.
+    /// selecting one immediately confirms it. Used for the templates browser.
     fn new_dir_browser(title: &str, path: &std::path::Path) -> Self {
         let mut entries: Vec<(String, PathBuf)> = fs::read_dir(path)
             .into_iter().flatten().flatten()
@@ -153,37 +188,58 @@ impl PopupState {
             .map(|e| (e.file_name().to_string_lossy().into_owned(), e.path()))
             .collect();
         entries.sort_by(|a, b| a.0.cmp(&b.0));
-        let mut ls = ListState::default();
-        if !entries.is_empty() { ls.select(Some(0)); }
-        PopupState {
+        let mut ps = PopupState {
             kind: PopupKind::DirBrowser,
             title: title.to_string(),
-            items: entries.iter().map(|(n, _)| n.clone()).collect(),
-            paths: entries.into_iter().map(|(_, p)| p).collect(),
-            list_state: ls,
+            items: vec![], paths: vec![], list_state: ListState::default(),
             lines: vec![], scroll: 0, done: false, rx: None,
             input_value: String::new(),
             browse_roots: vec![], browse_stack: vec![], browse_leaf_check: false,
             up_entry: false, base_title: title.to_string(),
-        }
+            filter: String::new(),
+            all_items: entries.iter().map(|(n, _)| n.clone()).collect(),
+            all_paths: entries.into_iter().map(|(_, p)| p).collect(),
+        };
+        ps.apply_filter();
+        ps
     }
 
     /// Single-level picker over a small list of (label, path) options — used
     /// to choose which configured workspace root a new project should go in.
     fn new_root_picker(title: &str, roots: &[config::ProjectRoot]) -> Self {
-        let mut ls = ListState::default();
-        if !roots.is_empty() { ls.select(Some(0)); }
-        PopupState {
+        let mut ps = PopupState {
             kind: PopupKind::DirBrowser,
             title: title.to_string(),
-            items: roots.iter().map(|r| r.label.clone()).collect(),
-            paths: roots.iter().map(|r| r.path.clone()).collect(),
-            list_state: ls,
+            items: vec![], paths: vec![], list_state: ListState::default(),
             lines: vec![], scroll: 0, done: false, rx: None,
             input_value: String::new(),
             browse_roots: vec![], browse_stack: vec![], browse_leaf_check: false,
             up_entry: false, base_title: title.to_string(),
-        }
+            filter: String::new(),
+            all_items: roots.iter().map(|r| r.label.clone()).collect(),
+            all_paths: roots.iter().map(|r| r.path.clone()).collect(),
+        };
+        ps.apply_filter();
+        ps
+    }
+
+    /// Single-level picker over the MRU recent-projects list. Selecting an
+    /// entry opens it directly (no drilling — these are already known leaves).
+    fn new_recent_picker(title: &str, recent: &[(String, PathBuf)]) -> Self {
+        let mut ps = PopupState {
+            kind: PopupKind::DirBrowser,
+            title: title.to_string(),
+            items: vec![], paths: vec![], list_state: ListState::default(),
+            lines: vec![], scroll: 0, done: false, rx: None,
+            input_value: String::new(),
+            browse_roots: vec![], browse_stack: vec![], browse_leaf_check: false,
+            up_entry: false, base_title: title.to_string(),
+            filter: String::new(),
+            all_items: recent.iter().map(|(l, _)| l.clone()).collect(),
+            all_paths: recent.iter().map(|(_, p)| p.clone()).collect(),
+        };
+        ps.apply_filter();
+        ps
     }
 
     /// Recursive, multi-root project browser. Starts at the root picker if
@@ -205,6 +261,7 @@ impl PopupState {
             browse_leaf_check: true,
             up_entry: false,
             base_title: title.to_string(),
+            filter: String::new(), all_items: vec![], all_paths: vec![],
         };
         if ps.browse_roots.len() == 1 {
             let only = ps.browse_roots[0].1.clone();
@@ -216,24 +273,26 @@ impl PopupState {
 
     /// Recompute items/paths/title for the current position in a recursive
     /// project browser (either the root picker, or a directory listing).
+    /// Clears any active filter, since the listing itself just changed.
     fn refresh_project_browser(&mut self) {
-        self.items.clear();
-        self.paths.clear();
+        self.all_items.clear();
+        self.all_paths.clear();
+        self.filter.clear();
         self.up_entry = false;
 
         if self.browse_stack.is_empty() {
             // Root picker: only reached when more than one root is configured.
             for (label, _) in &self.browse_roots {
-                self.items.push(label.clone());
+                self.all_items.push(label.clone());
             }
-            self.paths = self.browse_roots.iter().map(|(_, p)| p.clone()).collect();
+            self.all_paths = self.browse_roots.iter().map(|(_, p)| p.clone()).collect();
             self.title = self.base_title.clone();
         } else {
             let cur = self.browse_stack.last().unwrap().clone();
             let show_up = self.browse_stack.len() > 1 || self.browse_roots.len() > 1;
             if show_up {
-                self.items.push("..".to_string());
-                self.paths.push(cur.clone()); // placeholder; handled via up_entry, not this path
+                self.all_items.push("..".to_string());
+                self.all_paths.push(cur.clone()); // placeholder; handled via up_entry, not this path
                 self.up_entry = true;
             }
             let mut entries: Vec<(String, PathBuf)> = fs::read_dir(&cur)
@@ -243,8 +302,8 @@ impl PopupState {
                 .collect();
             entries.sort_by(|a, b| a.0.cmp(&b.0));
             for (name, path) in entries {
-                self.items.push(name);
-                self.paths.push(path);
+                self.all_items.push(name);
+                self.all_paths.push(path);
             }
 
             let breadcrumb: Vec<String> = self.browse_stack.iter()
@@ -253,22 +312,39 @@ impl PopupState {
             self.title = format!("{} [{}]", self.base_title, breadcrumb.join(" / "));
         }
 
-        if self.items.is_empty() {
-            self.list_state.select(None);
-        } else {
-            self.list_state.select(Some(0));
-        }
+        self.apply_filter();
     }
 
     fn new_text_input(prompt: &str) -> Self {
+        Self::new_text_input_prefilled(prompt, "")
+    }
+
+    /// Text input popup pre-filled with an initial value (e.g. current name
+    /// for a rename), with the cursor at the end.
+    fn new_text_input_prefilled(prompt: &str, initial: &str) -> Self {
         PopupState {
             kind: PopupKind::TextInput,
             title: prompt.to_string(),
             items: vec![], paths: vec![], list_state: ListState::default(),
             lines: vec![], scroll: 0, done: false, rx: None,
-            input_value: String::new(),
+            input_value: initial.to_string(),
             browse_roots: vec![], browse_stack: vec![], browse_leaf_check: false,
             up_entry: false, base_title: prompt.to_string(),
+            filter: String::new(), all_items: vec![], all_paths: vec![],
+        }
+    }
+
+    /// Yes/no confirmation popup (e.g. "Delete project X?").
+    fn new_confirm(message: &str) -> Self {
+        PopupState {
+            kind: PopupKind::Confirm,
+            title: message.to_string(),
+            items: vec![], paths: vec![], list_state: ListState::default(),
+            lines: vec![], scroll: 0, done: false, rx: None,
+            input_value: String::new(),
+            browse_roots: vec![], browse_stack: vec![], browse_leaf_check: false,
+            up_entry: false, base_title: message.to_string(),
+            filter: String::new(), all_items: vec![], all_paths: vec![],
         }
     }
 }
@@ -282,16 +358,45 @@ fn is_leaf_dir(path: &std::path::Path) -> bool {
         .any(|e| e.file_type().map(|ft| ft.is_file()).unwrap_or(false))
 }
 
+/// Build a "RootLabel:relative/path" label for a project, used in the
+/// recent-projects list (e.g. "Uni:2026-Fall/CS301/hw1").
+fn compute_project_label(roots: &[(String, PathBuf)], path: &std::path::Path) -> String {
+    for (label, root_path) in roots {
+        if let Ok(rel) = path.strip_prefix(root_path) {
+            return format!("{}:{}", label, rel.display());
+        }
+    }
+    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string())
+}
+
 // Tracks multi-step workflows (e.g. prompt → copy → nvim → compile)
 enum WorkflowState {
     WaitingForBlankRoot    { templates_dir: PathBuf },
-    WaitingForBlankName    { templates_dir: PathBuf, projects_dir: PathBuf },
+    WaitingForBlankName    { templates_dir: PathBuf, projects_dir: PathBuf, root_label: String },
     WaitingForTemplateRoot { templates_dir: PathBuf },
-    WaitingForTemplate     { projects_dir: PathBuf },
-    WaitingForTemplateName { template_path: PathBuf, projects_dir: PathBuf },
+    WaitingForTemplate     { projects_dir: PathBuf, root_label: String },
+    WaitingForTemplateName { template_path: PathBuf, projects_dir: PathBuf, root_label: String },
     WaitingForProject,
+    WaitingForRecentProject,
     WaitingForMindmapProject { tui_dir: PathBuf },
     WaitingForEditorChoice,
+    // Delete/rename, triggered from inside the recursive project browser.
+    // `resume` restores whichever browser flow (open / mindmap) was active,
+    // and the browse context lets us reopen the browser at the same spot.
+    WaitingForDeleteConfirm {
+        target: PathBuf,
+        browse_roots: Vec<(String, PathBuf)>,
+        browse_stack: Vec<PathBuf>,
+        base_title: String,
+        resume: Box<WorkflowState>,
+    },
+    WaitingForRenameName {
+        target: PathBuf,
+        browse_roots: Vec<(String, PathBuf)>,
+        browse_stack: Vec<PathBuf>,
+        base_title: String,
+        resume: Box<WorkflowState>,
+    },
 }
 
 struct App {
@@ -323,8 +428,16 @@ enum Action {
     Quit, MainNext, MainPrev,
     ClosePopup,
     BrowserNext, BrowserPrev,
+    BrowserUp,
     OutputScrollUp, OutputScrollDown,
     DirBrowserConfirm,
+    FilterChar(char),
+    FilterBackspace,
+    FilterClear,
+    DeletePrompt,
+    RenamePrompt,
+    ConfirmYes,
+    ConfirmNo,
     TextInputConfirm,
     TextInputChar(char),
     TextInputBackspace,
@@ -589,7 +702,15 @@ fn main() -> io::Result<()> {
                         f.render_widget(Clear, popup_area);
                         let items: Vec<ListItem> = popup.items.iter()
                             .map(|i| ListItem::new(i.as_str())).collect();
-                        let hint = "\u{2191}\u{2193} or j/k to navigate  \u{23ce} select  Esc cancel";                        
+                        let hint = if popup.filter.is_empty() {
+                            if popup.browse_leaf_check {
+                                "\u{2191}\u{2193} navigate  type to filter  \u{23ce} select  ^R rename  ^D delete  Esc cancel".to_string()
+                            } else {
+                                "\u{2191}\u{2193} navigate  type to filter  \u{23ce} select  Esc cancel".to_string()
+                            }
+                        } else {
+                            format!("filter: {}\u{258c}   Esc clear/cancel  \u{23ce} select", popup.filter)
+                        };
                         let list = List::new(items)
                             .block(Block::default()
                                 .title(format!(" {}  ({}) ", popup.title, hint))
@@ -597,6 +718,21 @@ fn main() -> io::Result<()> {
                             .highlight_style(Style::default().fg(cfg.accent_color).add_modifier(Modifier::BOLD))
                             .highlight_symbol("> ");
                         f.render_stateful_widget(list, popup_area, &mut popup.list_state);
+                    }
+                    PopupKind::Confirm => {
+                        let popup_area = centered_rect(55, 22, content_area);
+                        f.render_widget(Clear, popup_area);
+                        let widget = Paragraph::new(vec![
+                            Line::raw(""),
+                            Line::from(format!("  {}", popup.title)),
+                            Line::raw(""),
+                            Line::from(Span::styled(
+                                "  y confirm  |  n / Esc cancel",
+                                Style::default().fg(cfg.footer_color),
+                            )),
+                        ])
+                        .block(Block::default().borders(Borders::ALL));
+                        f.render_widget(widget, popup_area);
                     }
                     PopupKind::Output => {
                         let popup_area = centered_rect(80, 80, content_area);
@@ -646,10 +782,24 @@ fn main() -> io::Result<()> {
         let action: Option<Action> = if let Some(ref popup) = app.popup {
             match popup.kind {
                 PopupKind::DirBrowser => match key.code {
-                    KeyCode::Up     | KeyCode::Char('k') => Some(Action::BrowserPrev),
-                    KeyCode::Down   | KeyCode::Char('j') => Some(Action::BrowserNext),
-                    KeyCode::Esc                         => Some(Action::ClosePopup),
-                    KeyCode::Enter                       => Some(Action::DirBrowserConfirm),
+                    KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(Action::DeletePrompt),
+                    KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => Some(Action::RenamePrompt),
+                    KeyCode::Up    => Some(Action::BrowserPrev),
+                    KeyCode::Down  => Some(Action::BrowserNext),
+                    KeyCode::Left  => Some(Action::BrowserUp),
+                    KeyCode::Esc   => {
+                        if popup.filter.is_empty() { Some(Action::ClosePopup) } else { Some(Action::FilterClear) }
+                    }
+                    KeyCode::Enter => Some(Action::DirBrowserConfirm),
+                    KeyCode::Backspace => {
+                        if popup.filter.is_empty() { Some(Action::BrowserUp) } else { Some(Action::FilterBackspace) }
+                    }
+                    KeyCode::Char(c) => Some(Action::FilterChar(c)),
+                    _ => None,
+                },
+                PopupKind::Confirm => match key.code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => Some(Action::ConfirmYes),
+                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc   => Some(Action::ConfirmNo),
                     _ => None,
                 },
                 PopupKind::TextInput => match key.code {
@@ -725,6 +875,24 @@ fn main() -> io::Result<()> {
                 // (ClosePopupWithMsg removed — no longer needed)
                 Action::BrowserNext => { if let Some(ref mut p) = app.popup { p.browser_next(); } }
                 Action::BrowserPrev => { if let Some(ref mut p) = app.popup { p.browser_prev(); } }
+                Action::BrowserUp => {
+                    if let Some(p) = app.popup.as_mut() {
+                        if p.browse_leaf_check && !p.browse_stack.is_empty() {
+                            if p.browse_stack.len() > 1 { p.browse_stack.pop(); }
+                            else { p.browse_stack.clear(); }
+                            p.refresh_project_browser();
+                        }
+                    }
+                }
+                Action::FilterChar(c) => {
+                    if let Some(p) = app.popup.as_mut() { p.filter.push(c); p.apply_filter(); }
+                }
+                Action::FilterBackspace => {
+                    if let Some(p) = app.popup.as_mut() { p.filter.pop(); p.apply_filter(); }
+                }
+                Action::FilterClear => {
+                    if let Some(p) = app.popup.as_mut() { p.filter.clear(); p.apply_filter(); }
+                }
                 Action::OutputScrollUp => {
                     if let Some(ref mut p) = app.popup { p.scroll = p.scroll.saturating_sub(1); }
                 }
@@ -781,12 +949,14 @@ fn main() -> io::Result<()> {
                             Nav::Navigated => {}
                             Nav::Nothing => { app.message = Some("Nothing selected.".to_string()); }
                             Nav::Selected(project_dir) => {
+                                let roots_snapshot = app.popup.as_ref().map(|p| p.browse_roots.clone()).unwrap_or_default();
                                 app.popup = None;
                                 match app.workflow.take() {
                                     Some(WorkflowState::WaitingForProject) => {
                                         if let Err(e) = open_editor_in_project(&cfg.editor, &project_dir, &mut terminal) {
                                             app.message = Some(format!("Failed to launch editor: {}", e));
                                         }
+                                        config::record_recent(&compute_project_label(&roots_snapshot, &project_dir), &project_dir);
                                         if cfg.auto_compile {
                                             app.pending_pdf = Some(project_dir.join(".build").join("main.pdf"));
                                             app.popup = Some(launch_compile(project_dir, &cfg.latex_compiler));
@@ -808,28 +978,127 @@ fn main() -> io::Result<()> {
                             }
                         }
                     } else {
-                        // Legacy single-level browser: templates list, or a
-                        // "pick a workspace root" step for creation flows.
+                        // Legacy single-level browser: templates list, root
+                        // picker, or the recent-projects list. Capture both
+                        // the label and path, since some flows need the label
+                        // (e.g. as the chosen workspace's display name).
                         let selected = app.popup.as_ref().and_then(|p| {
-                            p.list_state.selected().and_then(|i| p.paths.get(i).cloned())
+                            p.list_state.selected().and_then(|i| {
+                                let path = p.paths.get(i)?.clone();
+                                let label = p.items.get(i).cloned().unwrap_or_default();
+                                Some((label, path))
+                            })
                         });
                         let workflow = app.workflow.take();
                         app.popup = None;
                         match (selected, workflow) {
-                            (Some(root_path), Some(WorkflowState::WaitingForBlankRoot { templates_dir })) => {
-                                app.workflow = Some(WorkflowState::WaitingForBlankName { templates_dir, projects_dir: root_path });
+                            (Some((label, root_path)), Some(WorkflowState::WaitingForBlankRoot { templates_dir })) => {
+                                app.workflow = Some(WorkflowState::WaitingForBlankName { templates_dir, projects_dir: root_path, root_label: label });
                                 app.popup = Some(PopupState::new_text_input("Enter project name:"));
                             }
-                            (Some(root_path), Some(WorkflowState::WaitingForTemplateRoot { templates_dir })) => {
-                                app.workflow = Some(WorkflowState::WaitingForTemplate { projects_dir: root_path });
+                            (Some((label, root_path)), Some(WorkflowState::WaitingForTemplateRoot { templates_dir })) => {
+                                app.workflow = Some(WorkflowState::WaitingForTemplate { projects_dir: root_path, root_label: label });
                                 app.popup = Some(PopupState::new_dir_browser("Select a template:", &templates_dir));
                             }
-                            (Some(template_path), Some(WorkflowState::WaitingForTemplate { projects_dir })) => {
-                                app.workflow = Some(WorkflowState::WaitingForTemplateName { template_path, projects_dir });
+                            (Some((_, template_path)), Some(WorkflowState::WaitingForTemplate { projects_dir, root_label })) => {
+                                app.workflow = Some(WorkflowState::WaitingForTemplateName { template_path, projects_dir, root_label });
                                 app.popup = Some(PopupState::new_text_input("Enter project name:"));
+                            }
+                            (Some((label, project_dir)), Some(WorkflowState::WaitingForRecentProject)) => {
+                                if let Err(e) = open_editor_in_project(&cfg.editor, &project_dir, &mut terminal) {
+                                    app.message = Some(format!("Failed to launch editor: {}", e));
+                                }
+                                config::record_recent(&label, &project_dir); // bump to front
+                                if cfg.auto_compile {
+                                    app.pending_pdf = Some(project_dir.join(".build").join("main.pdf"));
+                                    app.popup = Some(launch_compile(project_dir, &cfg.latex_compiler));
+                                } else {
+                                    app.message = Some("Auto-compile disabled.".to_string());
+                                }
                             }
                             _ => { app.message = Some("Nothing selected.".to_string()); }
                         }
+                    }
+                }
+                Action::DeletePrompt => {
+                    if let Some(p) = app.popup.as_ref() {
+                        if p.browse_leaf_check && !p.browse_stack.is_empty() {
+                            let idx = p.list_state.selected();
+                            let skip_up = p.up_entry;
+                            if let Some(i) = idx {
+                                if !(skip_up && i == 0) {
+                                    if let Some(target) = p.paths.get(i).cloned() {
+                                        let name = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                                        let msg = if is_leaf_dir(&target) {
+                                            format!("Delete project '{}'? This cannot be undone.", name)
+                                        } else {
+                                            format!("Delete folder '{}' and EVERYTHING inside it? This cannot be undone.", name)
+                                        };
+                                        let resume = app.workflow.take().unwrap_or(WorkflowState::WaitingForProject);
+                                        let browse_roots = p.browse_roots.clone();
+                                        let browse_stack = p.browse_stack.clone();
+                                        let base_title = p.base_title.clone();
+                                        app.workflow = Some(WorkflowState::WaitingForDeleteConfirm {
+                                            target, browse_roots, browse_stack, base_title, resume: Box::new(resume),
+                                        });
+                                        app.popup = Some(PopupState::new_confirm(&msg));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Action::RenamePrompt => {
+                    if let Some(p) = app.popup.as_ref() {
+                        if p.browse_leaf_check && !p.browse_stack.is_empty() {
+                            let idx = p.list_state.selected();
+                            let skip_up = p.up_entry;
+                            if let Some(i) = idx {
+                                if !(skip_up && i == 0) {
+                                    if let Some(target) = p.paths.get(i).cloned() {
+                                        let name = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                                        let resume = app.workflow.take().unwrap_or(WorkflowState::WaitingForProject);
+                                        let browse_roots = p.browse_roots.clone();
+                                        let browse_stack = p.browse_stack.clone();
+                                        let base_title = p.base_title.clone();
+                                        app.workflow = Some(WorkflowState::WaitingForRenameName {
+                                            target, browse_roots, browse_stack, base_title, resume: Box::new(resume),
+                                        });
+                                        app.popup = Some(PopupState::new_text_input_prefilled("Rename to:", &name));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Action::ConfirmYes => {
+                    app.popup = None;
+                    match app.workflow.take() {
+                        Some(WorkflowState::WaitingForDeleteConfirm { target, browse_roots, browse_stack, base_title, resume }) => {
+                            match fs::remove_dir_all(&target) {
+                                Ok(()) => app.message = Some("Deleted.".to_string()),
+                                Err(e) => app.message = Some(format!("Failed to delete: {}", e)),
+                            }
+                            let mut popup = PopupState::new_project_browser(&base_title, browse_roots);
+                            popup.browse_stack = browse_stack;
+                            popup.refresh_project_browser();
+                            app.popup = Some(popup);
+                            app.workflow = Some(*resume);
+                        }
+                        _ => {}
+                    }
+                }
+                Action::ConfirmNo => {
+                    app.popup = None;
+                    match app.workflow.take() {
+                        Some(WorkflowState::WaitingForDeleteConfirm { browse_roots, browse_stack, base_title, resume, .. }) => {
+                            let mut popup = PopupState::new_project_browser(&base_title, browse_roots);
+                            popup.browse_stack = browse_stack;
+                            popup.refresh_project_browser();
+                            app.popup = Some(popup);
+                            app.workflow = Some(*resume);
+                        }
+                        _ => { app.workflow = None; }
                     }
                 }
                 Action::TextInputChar(c) => {
@@ -843,12 +1112,12 @@ fn main() -> io::Result<()> {
                         .map(|p| p.input_value.trim().to_string())
                         .unwrap_or_default();
                     if name.is_empty() {
-                        app.message = Some("Project name cannot be empty.".to_string());
+                        app.message = Some("Name cannot be empty.".to_string());
                     } else {
                         let workflow = app.workflow.take();
                         app.popup = None;
                         match workflow {
-                            Some(WorkflowState::WaitingForBlankName { templates_dir, projects_dir }) => {
+                            Some(WorkflowState::WaitingForBlankName { templates_dir, projects_dir, root_label }) => {
                                 let project_dir = projects_dir.join(&name);
                                 let _ = fs::create_dir_all(&project_dir);
                                 let src = templates_dir.join("main.tex");
@@ -856,6 +1125,7 @@ fn main() -> io::Result<()> {
                                 if let Err(e) = open_editor_in_project(&cfg.editor, &project_dir, &mut terminal) {
                                     app.message = Some(format!("Failed to launch editor: {}", e));
                                 }
+                                config::record_recent(&format!("{}:{}", root_label, name), &project_dir);
                                 if cfg.auto_compile {
                                     app.pending_pdf = Some(project_dir.join(".build").join("main.pdf"));
                                     app.popup = Some(launch_compile(project_dir, &cfg.latex_compiler));
@@ -863,7 +1133,7 @@ fn main() -> io::Result<()> {
                                     app.message = Some("Auto-compile disabled.".to_string());
                                 }
                             }
-                            Some(WorkflowState::WaitingForTemplateName { template_path, projects_dir }) => {
+                            Some(WorkflowState::WaitingForTemplateName { template_path, projects_dir, root_label }) => {
                                 let project_dir = projects_dir.join(&name);
                                 let _ = fs::create_dir_all(&project_dir);
                                 if let Err(e) = copy_dir_filtered(&template_path, &project_dir) {
@@ -872,12 +1142,26 @@ fn main() -> io::Result<()> {
                                 if let Err(e) = open_editor_in_project(&cfg.editor, &project_dir, &mut terminal) {
                                     app.message = Some(format!("Failed to launch editor: {}", e));
                                 }
+                                config::record_recent(&format!("{}:{}", root_label, name), &project_dir);
                                 if cfg.auto_compile {
                                     app.pending_pdf = Some(project_dir.join(".build").join("main.pdf"));
                                     app.popup = Some(launch_compile(project_dir, &cfg.latex_compiler));
                                 } else {
                                     app.message = Some("Auto-compile disabled.".to_string());
                                 }
+                            }
+                            Some(WorkflowState::WaitingForRenameName { target, browse_roots, browse_stack, base_title, resume }) => {
+                                let parent = target.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from("."));
+                                let new_path = parent.join(&name);
+                                match fs::rename(&target, &new_path) {
+                                    Ok(()) => app.message = Some(format!("Renamed to '{}'.", name)),
+                                    Err(e) => app.message = Some(format!("Failed to rename: {}", e)),
+                                }
+                                let mut popup = PopupState::new_project_browser(&base_title, browse_roots);
+                                popup.browse_stack = browse_stack;
+                                popup.refresh_project_browser();
+                                app.popup = Some(popup);
+                                app.workflow = Some(*resume);
                             }
                             Some(WorkflowState::WaitingForEditorChoice) => {
                                 let choice = name.to_lowercase();
@@ -919,24 +1203,12 @@ fn main() -> io::Result<()> {
                         execute!(terminal.backend_mut(), EnterAlternateScreen)?;
                         terminal.clear()?;
                     }
-                    menu::Action::RevealInFinder { path } => {
-                        // Write the path to a temp file for the shell to source
-                        let cmd_file = std::path::PathBuf::from("/tmp/lx_cd");
-                        let cd_cmd = format!("cd '{}'", path.display());
-                        let _ = fs::write(&cmd_file, cd_cmd);
-                        // Restore the terminal before exiting — skipping this
-                        // leaves raw mode / the alternate screen active and
-                        // corrupts the shell prompt on return.
-                        disable_raw_mode()?;
-                        execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-                        return Ok(());
-                    }
                     menu::Action::CreateBlankProject { templates_dir, projects_roots } => {
                         if projects_roots.len() <= 1 {
-                            let projects_dir = projects_roots.get(0)
-                                .map(|r| r.path.clone())
-                                .unwrap_or_else(|| cfg.workspace_root.join("projects"));
-                            app.workflow = Some(WorkflowState::WaitingForBlankName { templates_dir, projects_dir });
+                            let (projects_dir, root_label) = projects_roots.get(0)
+                                .map(|r| (r.path.clone(), r.label.clone()))
+                                .unwrap_or_else(|| (cfg.workspace_root.join("projects"), "Projects".to_string()));
+                            app.workflow = Some(WorkflowState::WaitingForBlankName { templates_dir, projects_dir, root_label });
                             app.popup = Some(PopupState::new_text_input("Enter project name:"));
                         } else {
                             app.workflow = Some(WorkflowState::WaitingForBlankRoot { templates_dir });
@@ -947,10 +1219,10 @@ fn main() -> io::Result<()> {
                         if !templates_dir.is_dir() {
                             app.message = Some(format!("Templates dir not found: {}", templates_dir.display()));
                         } else if projects_roots.len() <= 1 {
-                            let projects_dir = projects_roots.get(0)
-                                .map(|r| r.path.clone())
-                                .unwrap_or_else(|| cfg.workspace_root.join("projects"));
-                            app.workflow = Some(WorkflowState::WaitingForTemplate { projects_dir });
+                            let (projects_dir, root_label) = projects_roots.get(0)
+                                .map(|r| (r.path.clone(), r.label.clone()))
+                                .unwrap_or_else(|| (cfg.workspace_root.join("projects"), "Projects".to_string()));
+                            app.workflow = Some(WorkflowState::WaitingForTemplate { projects_dir, root_label });
                             app.popup = Some(PopupState::new_dir_browser("Select a template:", &templates_dir));
                         } else {
                             app.workflow = Some(WorkflowState::WaitingForTemplateRoot { templates_dir });
@@ -964,6 +1236,15 @@ fn main() -> io::Result<()> {
                             app.workflow = Some(WorkflowState::WaitingForProject);
                             let roots = projects_roots.iter().map(|r| (r.label.clone(), r.path.clone())).collect();
                             app.popup = Some(PopupState::new_project_browser("Select a project:", roots));
+                        }
+                    }
+                    menu::Action::OpenRecent => {
+                        let recent = config::load_recent();
+                        if recent.is_empty() {
+                            app.message = Some("No recent projects yet.".to_string());
+                        } else {
+                            app.workflow = Some(WorkflowState::WaitingForRecentProject);
+                            app.popup = Some(PopupState::new_recent_picker("Recent projects:", &recent));
                         }
                     }
                     menu::Action::ConvertToMindmap { projects_roots, tui_dir } => {

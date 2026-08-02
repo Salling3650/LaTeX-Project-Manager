@@ -21,10 +21,14 @@
 //        more than one is configured), then drill into subfolders — a
 //        folder is treated as a project once it directly contains files
 //        (e.g. main.tex), otherwise selecting it just descends further.
-//        Opens the chosen project in the editor, then compiles.
+//        Type to filter the current folder's contents. Ctrl+R renames and
+//        Ctrl+D deletes (with a yes/no confirmation) the highlighted
+//        folder or project. Opens the chosen project in the editor, then
+//        compiles, and records it in the recent-projects list.
 //
-//    Action::RevealInFinder { path }
-//        Opens a folder in macOS Finder.
+//    Action::OpenRecent
+//        Shows the MRU list of recently opened/created projects, labelled
+//        "RootLabel:relative/path" (e.g. "Uni:2026-Fall/CS301/hw1").
 //
 //    Action::LaunchOutput { title, program, args, dir }
 //        Runs a command and streams its output into a popup window.
@@ -54,14 +58,14 @@ pub enum Action {
     LaunchOutput { title: String, program: String, args: Vec<String>, dir: Option<PathBuf> },
     /// Hand the terminal to an interactive program (e.g. nvim), return on exit.
     RunInteractive { program: String, args: Vec<String>, dir: Option<PathBuf> },
-    /// Open a folder in macOS Finder.
-    RevealInFinder { path: PathBuf },
     /// Prompt for a name, create blank project from templates/main.tex, open editor.
     CreateBlankProject { templates_dir: PathBuf, projects_roots: Vec<ProjectRoot> },
     /// Browse templates/, prompt for a name, copy, open editor.
     CreateFromTemplate { templates_dir: PathBuf, projects_roots: Vec<ProjectRoot> },
     /// Recursively browse one or more project roots, open the selected project.
     OpenLatexProject { projects_roots: Vec<ProjectRoot> },
+    /// Show the MRU list of recently opened/created projects.
+    OpenRecent,
     /// Recursively browse one or more project roots, convert selection to mindmap.
     ConvertToMindmap { projects_roots: Vec<ProjectRoot>, tui_dir: PathBuf },
     EditConfig,
@@ -110,19 +114,17 @@ pub const ITEMS: &[MenuItem] = &[
     },
 
     MenuItem {
+        label: "Recent projects",
+        action: |_| Action::OpenRecent,
+    },
+
+    MenuItem {
         label: "Convert to mindmap",
         action: |cfg| {
             Action::ConvertToMindmap {
                 projects_roots: cfg.project_roots.clone(),
                 tui_dir: cfg.workspace_root.clone(),
             }
-        },
-    },
-
-    MenuItem {
-        label: "Open project folder",
-        action: |cfg| Action::RevealInFinder {
-            path: cfg.workspace_root.clone(),
         },
     },
 

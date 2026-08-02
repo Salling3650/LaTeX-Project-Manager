@@ -37,11 +37,24 @@ impl Default for Config {
             footer_color:   Color::DarkGray,
             workspace_root,
             project_roots,
-            pdf_viewer:     "tdf".to_string(),
+            pdf_viewer:     default_pdf_viewer(),
             editor:         "nvim".to_string(),
             latex_compiler: "pdflatex".to_string(),
             auto_compile:   true,
         }
+    }
+}
+
+/// Best-effort platform default for opening a PDF. Only used when
+/// `pdf_viewer` isn't set in tui.conf — an explicit config value always wins.
+fn default_pdf_viewer() -> String {
+    if cfg!(target_os = "macos") {
+        "open".to_string()
+    } else if cfg!(target_os = "windows") {
+        "start".to_string()
+    } else {
+        // Linux and other Unix-likes
+        "xdg-open".to_string()
     }
 }
 
@@ -270,4 +283,48 @@ pub fn save_editor(editor: &str) -> io::Result<()> {
     let text = fs::read_to_string(&path).unwrap_or_default();
     let updated = upsert_key(&text, "editor", editor);
     fs::write(path, updated)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Recent projects — a small MRU list stored next to tui.conf.
+// Each line is "label<TAB>absolute path". Entries whose path no longer
+// exists are silently dropped on load, so deleted/moved projects never
+// need explicit cleanup.
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn recent_path() -> PathBuf {
+    match config_path().parent() {
+        Some(p) => p.join(".recent_projects"),
+        None => PathBuf::from(".recent_projects"),
+    }
+}
+
+pub fn load_recent() -> Vec<(String, PathBuf)> {
+    let text = match fs::read_to_string(recent_path()) {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+    text.lines()
+        .filter_map(|l| {
+            let mut parts = l.splitn(2, '\t');
+            let label = parts.next()?.to_string();
+            let p = PathBuf::from(parts.next()?);
+            if p.is_dir() { Some((label, p)) } else { None }
+        })
+        .collect()
+}
+
+/// Record (or bump to the front of) the recent-projects list.
+pub fn record_recent(label: &str, path: &std::path::Path) {
+    const MAX_RECENT: usize = 15;
+    let mut list = load_recent();
+    list.retain(|(_, p)| p != path);
+    list.insert(0, (label.to_string(), path.to_path_buf()));
+    list.truncate(MAX_RECENT);
+    let text = list
+        .iter()
+        .map(|(l, p)| format!("{}\t{}", l, p.display()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let _ = fs::write(recent_path(), text);
 }

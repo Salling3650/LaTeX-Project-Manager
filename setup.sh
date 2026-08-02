@@ -444,7 +444,7 @@ main() {
     echo -e "  ${GREEN}cd $SCRIPT_DIR${NC}"
     echo -e "  ${GREEN}lx${NC}"
     echo ""
-    echo "For more information, see README.md and INSTALL.md"
+    echo "For more information, see README.md and QUICKSTART.md"
     echo ""
 }
 

@@ -1,4 +1,4 @@
-# Welcome to LaTeX Manager 👋
+# Welcome to LaTeX Manager
 
 This repository contains a **terminal UI for creating and managing LaTeX projects**.
 
@@ -43,16 +43,16 @@ This is a **Rust project** with:
 
 | Key | Action |
 |---|---|
-| `↑`/`↓` | Navigate menu |
+| `↑`/`↓` | Navigate menu / browser |
 | `Enter` | Select item |
-| `Ctrl+N` | Toggle sticky notes |
+| (type letters) | Filter the current browser listing |
+| `Ctrl+R` / `Ctrl+D` | Rename / delete a project (in the browser) |
 | `q` | Quit |
 
 ## Documentation
 
 - **[QUICKSTART.md](../QUICKSTART.md)** — Setup and basic usage
 - **[README.md](../README.md)** — Project overview and features
-- **[INSTALL.md](../INSTALL.md)** — Detailed installation (manual steps)
 - **[.github/copilot-instructions.md](copilot-instructions.md)** — For developers/AI
 
 ## Troubleshooting
@@ -64,12 +64,8 @@ This is a **Rust project** with:
 chmod -R u+w /path/to/Latex
 ```
 
-**Need manual setup?** See [INSTALL.md](../INSTALL.md) for step-by-step instructions
-
 ## Next Steps
 
 1. Run `./setup.sh`
 2. Launch the TUI: `lx`
-3. Create your first project 🎉
-
-Happy writing!
+3. Create your first project

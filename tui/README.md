@@ -1,7 +1,6 @@
 # tui
 
-A terminal launcher built with [Ratatui](https://github.com/ratatui-org/ratatui) and Rust.  
-Navigate your projects, run scripts, open apps, and jot notes — all from one keyboard-driven menu.
+The Rust terminal interface for LaTeX Manager, built with [Ratatui](https://github.com/ratatui-org/ratatui).
 
 ---
 
@@ -9,8 +8,9 @@ Navigate your projects, run scripts, open apps, and jot notes — all from one k
 
 - ANSI Shadow ASCII art header (auto-scales to terminal height)
 - Centered, keyboard-navigated menu
-- Popup overlays for command output and file/folder browsing
-- Sticky note panel (Ctrl+N) with autosave
+- Recursive, multi-root project browser with type-to-filter, rename (`Ctrl+R`), and delete (`Ctrl+D`, with confirmation)
+- Recent-projects list (MRU, labelled `RootLabel:relative/path`)
+- Popup overlays for command output, the project/template browser, and text input
 - Colour theming via `tui.conf`
 - All menu items live in one file — easy to customise
 
@@ -36,6 +36,8 @@ cargo run          # debug build
 cargo run --release  # optimised
 ```
 
+The compiled binary is not committed to git — build it locally with the commands above, or via `../setup.sh` / `../build.sh`.
+
 ---
 
 ## Customisation
@@ -54,17 +56,17 @@ Run `cargo build` — the figlet art regenerates automatically in both full and 
 
 ### Add or edit menu items
 
-All menu items live in `src/menu.rs`.  
-Each entry is a `MenuItem` with a `label` and an `action` closure:
+All menu items live in `src/menu.rs`.
+Each entry is a `MenuItem` with a `label` and an `action` closure that receives the loaded `Config`:
 
 ```rust
 MenuItem {
     label: "My Script",
-    action: || Action::LaunchOutput {
+    action: |cfg| Action::LaunchOutput {
         title:   "My Script".into(),
         program: "python3".into(),
-        args:    s(&["my_script.py"]),
-        dir:     Some(home_dir().join("projects/my_project")),
+        args:    vec!["my_script.py".into()],
+        dir:     Some(cfg.workspace_root.join("scripts")),
     },
 },
 ```
@@ -73,24 +75,26 @@ Available action types (documented at the top of `src/menu.rs`):
 
 | Action | What it does |
 |--------|-------------|
+| `CreateBlankProject { templates_dir, projects_roots }` | Create a project from `templates/main.tex` |
+| `CreateFromTemplate { templates_dir, projects_roots }` | Browse and copy a full template folder |
+| `OpenLatexProject { projects_roots }` | Recursively browse and open an existing project |
+| `OpenRecent` | Show the MRU recent-projects list |
+| `ConvertToMindmap { projects_roots, tui_dir }` | Convert a project to an interactive HTML mindmap |
 | `LaunchOutput { title, program, args, dir }` | Runs a command and streams output into a popup |
-| `RunInteractive { program, args, dir }` | Hands the full terminal to the program (ncurses, REPLs, etc.) |
-| `OpenVSCode { path }` | Opens a folder in VS Code |
-| `OpenSSH { user, host }` | Opens SSH in a new Terminal window (macOS) |
-| `OpenBrowser { dirs_only }` | File (`false`) or folder (`true`) picker |
+| `RunInteractive { program, args, dir }` | Hands the full terminal to the program (nvim, REPLs, etc.) |
+| `SetEditor` | Prompt for and save the editor (`nvim`/`vscode`) |
+| `EditConfig` | Open `tui.conf` in the configured editor |
 | `Quit` | Exits the TUI |
 
 ---
 
 ### Change colours
 
-Edit `tui.conf` in the project root — changes take effect on next launch:
+Edit `tui.conf` in this directory — changes take effect on next launch:
 
 ```ini
-accent_color      = cyan       # title art, menu highlight, ">" symbol
-footer_color      = dark_gray
-note_border_color = yellow
-note_cursor_bg    = yellow
+accent_color = cyan       # title art, menu highlight, ">" symbol
+footer_color = dark_gray
 ```
 
 Available colour names: `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`,
@@ -102,11 +106,10 @@ Available colour names: `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `c
 
 | Key | Action |
 |-----|--------|
-| `↑` / `↓` | Navigate menu |
+| `↑` / `↓` | Navigate menu / browser |
 | `Enter` | Select item |
-| `Ctrl+N` | Toggle sticky note |
-| `Esc` | Close popup / close note |
-| `q` | Quit |
-
-Inside the note panel, typing works normally. `Ctrl+N` or `Esc` closes it.  
-The note is saved automatically to `~/.tui_note.txt`.
+| (type letters) | Filter the current browser listing |
+| `Ctrl+R` | Rename the highlighted project/folder (project browser only) |
+| `Ctrl+D` | Delete the highlighted project/folder, with confirmation |
+| `Esc` | Close popup / clear filter |
+| `q` | Quit (main menu only) |

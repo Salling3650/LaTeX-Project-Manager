@@ -590,8 +590,212 @@ fn open_file_in_editor(
     Ok(())
 }
 
+// ── CLI shortcuts (lx new / lx open / lx recent / lx -h) ────────────────────
+// Parsed and resolved entirely before the terminal is touched, so a bad
+// command, missing template, ambiguous root, or "not found" case just prints
+// to stderr and exits — no alternate-screen flash for a one-line error.
+// The only cases that need the terminal are: opening the editor + streaming
+// the compile popup (OpenDirect), and showing a picker for ambiguous matches.
+
+enum CliCommand {
+    None,
+    Help,
+    New { name: String, template: Option<String>, root: Option<String> },
+    Open { query: String },
+    Recent,
+}
+
+enum CliStartState {
+    Menu,
+    OpenDirect { path: PathBuf, label: String },
+    ShowPicker { title: String, matches: Vec<(String, PathBuf)> },
+}
+
+fn print_cli_help() {
+    println!("lx — LaTeX Manager\n");
+    println!("Usage:");
+    println!("  lx                                    Open the interactive menu");
+    println!("  lx new <name> [-t <template>] [--root <label>]");
+    println!("                                         Create a project and open it.");
+    println!("                                         <name> may include '/' to nest it,");
+    println!("                                         e.g. 2026-Fall/CS301/hw4");
+    println!("  lx open <query>                        Open a project matching <query>.");
+    println!("                                         Opens directly on a single match,");
+    println!("                                         otherwise shows a picker.");
+    println!("  lx recent | lx -r                      Open your most recently used project");
+    println!("  lx -h | --help                         Show this help");
+    println!();
+    println!("Examples:");
+    println!("  lx new 2026-Fall/CS301/hw4");
+    println!("  lx new 2026-Fall/CS301/hw4 -t lab-report");
+    println!("  lx new hw5 --root Personal");
+    println!("  lx open cs301");
+    println!("  lx -r");
+}
+
+fn parse_cli_args() -> Result<CliCommand, String> {
+    let args: Vec<String> = env::args().skip(1).collect();
+    if args.is_empty() { return Ok(CliCommand::None); }
+
+    match args[0].as_str() {
+        "-h" | "--help" => Ok(CliCommand::Help),
+        "-r" | "--recent" | "recent" => Ok(CliCommand::Recent),
+        "open" => {
+            // Join remaining args so `lx open CS 301` works the same as `lx open "CS 301"`.
+            if args.len() < 2 {
+                return Err("Usage: lx open <query>".to_string());
+            }
+            Ok(CliCommand::Open { query: args[1..].join(" ") })
+        }
+        "new" => {
+            let mut name = None;
+            let mut template = None;
+            let mut root = None;
+            let mut i = 1;
+            while i < args.len() {
+                let arg = args[i].as_str();
+                match arg {
+                    "-t" | "--template" => {
+                        let val = args.get(i + 1).filter(|v| !v.starts_with('-')).cloned()
+                            .ok_or_else(|| format!("{} requires a value, e.g. '{} lab-report'", arg, arg))?;
+                        template = Some(val);
+                        i += 2;
+                    }
+                    "--root" | "-w" => {
+                        let val = args.get(i + 1).filter(|v| !v.starts_with('-')).cloned()
+                            .ok_or_else(|| format!("{} requires a value, e.g. '{} Uni'", arg, arg))?;
+                        root = Some(val);
+                        i += 2;
+                    }
+                    other if other.starts_with('-') => {
+                        return Err(format!("Unknown option '{}' for 'lx new'. Run 'lx --help' for usage.", other));
+                    }
+                    other => {
+                        if name.is_none() { name = Some(other.to_string()); }
+                        i += 1;
+                    }
+                }
+            }
+            let name = name.ok_or_else(|| "Usage: lx new <name> [-t template] [--root label]".to_string())?;
+            Ok(CliCommand::New { name, template, root })
+        }
+        other => Err(format!("Unknown command '{}'. Run 'lx --help' for usage.", other)),
+    }
+}
+
+fn resolve_root<'a>(roots: &'a [config::ProjectRoot], wanted: &Option<String>) -> Result<&'a config::ProjectRoot, String> {
+    let available = || roots.iter().map(|r| r.label.clone()).collect::<Vec<_>>().join(", ");
+    if let Some(w) = wanted {
+        roots.iter().find(|r| r.label.eq_ignore_ascii_case(w))
+            .ok_or_else(|| format!("No project root named '{}'. Available: {}", w, available()))
+    } else if roots.len() == 1 {
+        Ok(&roots[0])
+    } else {
+        Err(format!("Multiple project roots configured — specify one with --root. Available: {}", available()))
+    }
+}
+
+/// Recursively collect leaf project directories under `dir` (stopping at the
+/// first directory that directly contains a file — same rule as the browser).
+fn walk_projects(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+    if is_leaf_dir(dir) {
+        out.push(dir.to_path_buf());
+        return;
+    }
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                walk_projects(&entry.path(), out);
+            }
+        }
+    }
+}
+
+/// Search all configured roots for projects whose "Label:relative/path"
+/// contains `query` (case-insensitive).
+fn search_projects(roots: &[(String, PathBuf)], query: &str) -> Vec<(String, PathBuf)> {
+    let q = query.to_lowercase();
+    let mut results = Vec::new();
+    for (label, root) in roots {
+        let mut found = Vec::new();
+        walk_projects(root, &mut found);
+        for path in found {
+            let rel = path.strip_prefix(root).unwrap_or(&path);
+            let full_label = format!("{}:{}", label, rel.display());
+            if full_label.to_lowercase().contains(&q) {
+                results.push((full_label, path));
+            }
+        }
+    }
+    results.sort_by(|a, b| a.0.cmp(&b.0));
+    results
+}
+
+/// Turn a parsed CLI command into the app's starting state, performing any
+/// filesystem side effects (creating a new project) along the way. No
+/// terminal interaction happens here — errors are returned to be printed
+/// to stderr before the TUI is ever entered.
+fn resolve_cli(cfg: &config::Config, cmd: CliCommand) -> Result<CliStartState, String> {
+    match cmd {
+        CliCommand::None => Ok(CliStartState::Menu),
+        CliCommand::Help => unreachable!("Help is handled before this point"),
+        CliCommand::New { name, template, root } => {
+            let r = resolve_root(&cfg.project_roots, &root)?;
+            let project_dir = r.path.join(&name);
+            if project_dir.exists() {
+                return Err(format!("'{}' already exists in {}.", name, r.label));
+            }
+            if let Some(t) = &template {
+                let template_path = cfg.workspace_root.join("templates").join(t);
+                if !template_path.is_dir() {
+                    return Err(format!("Template '{}' not found in templates/.", t));
+                }
+                fs::create_dir_all(&project_dir).map_err(|e| e.to_string())?;
+                copy_dir_filtered(&template_path, &project_dir).map_err(|e| e.to_string())?;
+            } else {
+                fs::create_dir_all(&project_dir).map_err(|e| e.to_string())?;
+                let src = cfg.workspace_root.join("templates").join("main.tex");
+                if src.exists() { let _ = fs::copy(&src, project_dir.join("main.tex")); }
+            }
+            Ok(CliStartState::OpenDirect { path: project_dir, label: format!("{}:{}", r.label, name) })
+        }
+        CliCommand::Open { query } => {
+            let roots: Vec<(String, PathBuf)> = cfg.project_roots.iter().map(|r| (r.label.clone(), r.path.clone())).collect();
+            let mut matches = search_projects(&roots, &query);
+            match matches.len() {
+                0 => Err(format!("No project matches '{}'.", query)),
+                1 => {
+                    let (label, path) = matches.remove(0);
+                    Ok(CliStartState::OpenDirect { path, label })
+                }
+                _ => Ok(CliStartState::ShowPicker { title: format!("Matches for '{}':", query), matches }),
+            }
+        }
+        CliCommand::Recent => {
+            match config::load_recent().into_iter().next() {
+                None => Err("No recent projects yet.".to_string()),
+                Some((label, path)) => Ok(CliStartState::OpenDirect { path, label }),
+            }
+        }
+    }
+}
+
 fn main() -> io::Result<()> {
+    let cli_cmd = match parse_cli_args() {
+        Ok(c) => c,
+        Err(e) => { eprintln!("{}", e); std::process::exit(1); }
+    };
+    if matches!(cli_cmd, CliCommand::Help) {
+        print_cli_help();
+        return Ok(());
+    }
+
     let mut cfg = config::load();
+
+    let cli_start = match resolve_cli(&cfg, cli_cmd) {
+        Ok(s) => s,
+        Err(e) => { eprintln!("{}", e); std::process::exit(1); }
+    };
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -601,6 +805,26 @@ fn main() -> io::Result<()> {
 
     let mut app = App::new();
     let mut quit = false;
+
+    match cli_start {
+        CliStartState::Menu => {}
+        CliStartState::OpenDirect { path, label } => {
+            if let Err(e) = open_editor_in_project(&cfg.editor, &path, &mut terminal) {
+                app.message = Some(format!("Failed to launch editor: {}", e));
+            }
+            config::record_recent(&label, &path);
+            if cfg.auto_compile {
+                app.pending_pdf = Some(path.join(".build").join("main.pdf"));
+                app.popup = Some(launch_compile(path, &cfg.latex_compiler));
+            } else {
+                app.message = Some("Auto-compile disabled.".to_string());
+            }
+        }
+        CliStartState::ShowPicker { title, matches } => {
+            app.workflow = Some(WorkflowState::WaitingForRecentProject);
+            app.popup = Some(PopupState::new_recent_picker(&title, &matches));
+        }
+    }
 
     let labels: Vec<&str> = menu::ITEMS.iter().map(|m| m.label).collect();
 

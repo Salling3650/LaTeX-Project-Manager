@@ -113,3 +113,18 @@ Available colour names: `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `c
 | `Ctrl+D` | Delete the highlighted project/folder, with confirmation |
 | `Esc` | Close popup / clear filter |
 | `q` | Quit (main menu only) |
+
+---
+
+## CLI shortcuts
+
+```bash
+lx new 2026-Fall/CS301/hw4                  # blank project, opens + compiles
+lx new 2026-Fall/CS301/hw4 -t lab-report    # from a template
+lx new hw5 --root Personal                  # pick a root when more than one is configured
+lx open cs301                               # open by name; picker shown if more than one match
+lx -r                                       # or: lx recent — reopen your last project
+lx -h                                       # or: lx --help
+```
+
+These resolve entirely before the TUI opens — an unknown project, missing template, or ambiguous root prints an error and exits instead of launching the interface.

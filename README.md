@@ -24,6 +24,19 @@ lx          # if the lx symlink is set up (see QUICKSTART.md)
 cd /path/to/Latex && ./tui/tui
 ```
 
+### CLI shortcuts
+
+For quick actions without navigating the menu:
+
+```bash
+lx new 2026-Fall/CS301/hw4                  # blank project, opens + compiles
+lx new 2026-Fall/CS301/hw4 -t lab-report    # from a template
+lx new hw5 --root Personal                  # pick a root when more than one is configured
+lx open cs301                               # open by name; picker shown if more than one match
+lx -r                                       # or: lx recent — reopen your last project
+lx -h                                       # or: lx --help
+```
+
 ## Configuration
 
 Edit `tui/tui.conf` to customise colours and the PDF viewer:

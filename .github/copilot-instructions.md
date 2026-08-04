@@ -181,6 +181,10 @@ The `latex-to-mindmap-portable.sh` script converts LaTeX projects to interactive
 - Installs dependencies (pylatexenc, markmap-cli) on first run
 - Outputs `<projectname>_mindmap.html` and `<projectname>_mindmap.md`
 
+### CLI Shortcuts
+
+`main()` parses `env::args()` before any terminal setup. `lx new <name> [-t template] [--root label]`, `lx open <query>`, and `lx recent`/`lx -r` all resolve entirely on the filesystem first via `resolve_cli()` — a bad root, missing template, name collision, or zero matches prints to stderr and exits (code 1) without ever entering raw mode / the alternate screen. Only a successful resolution proceeds into the terminal: either `CliStartState::OpenDirect` (open the editor + stream the compile popup) or `CliStartState::ShowPicker` (multiple `open` matches — reuses the recent-projects picker UI). Both pre-seed `App`'s `workflow`/`popup` before the event loop starts, reusing the exact same code a menu selection would use. `lx -h`/`--help` exits before even loading `tui.conf`.
+
 ## Codebase Notes
 
 - **Platform support** — macOS and Linux (Debian/Ubuntu via apt, Arch via pacman); `setup.sh` handles both

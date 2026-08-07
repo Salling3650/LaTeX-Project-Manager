@@ -17,7 +17,7 @@ The terminal interface is organized around three source files (kept as a single 
 - **`src/main.rs`** — Event loop, terminal rendering, popup management (output streaming, recursive/multi-root project browser, text input, yes/no confirm)
 - **`src/menu.rs`** — Menu item definitions and action types; edit this file to add/remove menu items
 - **`src/config.rs`** — Configuration parser for `tui.conf` (colors, PDF viewer, project roots, recent-projects persistence)
-- **`build.rs`** — Build-time script that generates ASCII title art from a hardcoded constant using figlet
+- **`build.rs`** — Build-time script that generates ASCII title art from a hardcoded constant using the `figlet-rs` crate (pure Rust, no external `figlet` binary or Python involved)
 
 Key concepts:
 
@@ -34,7 +34,8 @@ Templates are folders inside `templates/` directory. When a user selects "Templa
 1. Shows a file browser of template folders
 2. Prompts for a project name
 3. Copies the template to `<projects_root>/<name>/`, filtering out build artifacts
-4. Opens the project in Neovim and auto-compiles
+4. Runs `apply_template_vars()`, substituting `{{DATE}}`, `{{CLASS}}`, `{{PROJECT}}` in every `.tex`/`.bib`/`.cls`/`.sty` file (see "Template Variables" below)
+5. Opens the project in Neovim and auto-compiles
 
 ### Project Layout
 
@@ -63,12 +64,14 @@ Latex/
 ./setup.sh
 ```
 
-This automated script:
-- Checks and installs all dependencies (Rust, Python, Neovim, LaTeX, rsync)
+No prompts. This script:
+- Checks and installs Rust, Python, Neovim, rsync, npm (skipped if already present)
+- Installs a working LaTeX distribution automatically if `latexmk` isn't already on PATH (BasicTeX on macOS; a lighter-than-`texlive-full` set on Debian/Ubuntu; `texlive-most` on Arch) — `--skip-latex` opts out
 - Builds the TUI in release mode
 - Creates an `lx` symlink for easy launching
-- Configures the PDF viewer alias
-- Detects the workspace root
+- Verifies the result and reports honestly if something (usually LaTeX, if there's no sudo/network) still needs manual finishing
+
+PDF viewer and workspace root are no longer separate setup steps — both are auto-detected by the binary itself at runtime (see `config.rs`), so there's nothing to configure unless you want to override the defaults in `tui.conf`.
 
 **Supported:**
 - **macOS:** Homebrew-based installation
@@ -161,18 +164,21 @@ The build script auto-generates ASCII art in two sizes (full and compact) that s
 
 - **crossterm** — Terminal event handling (keyboard, mouse)
 - **ratatui** — Terminal rendering and UI components
-- **figlet-rs** — Used at build time to generate ASCII art
+- **figlet-rs** — `[build-dependencies]` entry; generates ASCII art at compile time from the bundled `.flf` fonts in `tui/fonts/` — no Python, no system `figlet`, no network access needed to build
 
-External tools:
-- Rust + Cargo
-- Python 3 + pyfiglet (build-time dependency for figlet)
+External tools (used at runtime, not build time):
+- Rust + Cargo — to build the TUI at all
 - neovim — Opens `.tex` files for editing
 - latexmk / pdflatex — Compiles LaTeX
-- (Platform-specific: figlet, ReadLink compatibility)
+- python3 + pylatexenc, npm + markmap-cli — only needed for "Convert to mindmap"; `latex-to-mindmap-portable.sh` self-installs both on first use if missing
 
 ### LaTeX Compilation
 
-When a project is opened or created, the TUI spawns a subprocess running the configured LaTeX compiler in a `.build/` subdirectory inside the project. Output is streamed to a popup window in real time.
+When a project is opened or created, the TUI spawns a subprocess running the configured LaTeX compiler in a `.build/` subdirectory inside the project. Output is streamed to a popup window in real time, with `classify_compile_line()` colouring `! ` fatal errors red, `l.<N>` source pointers red, `Warning` lines yellow, and over/underfull box noise dimmed. On completion (`drain_output()`), the view auto-jumps to the first error line if one exists; the popup title shows an error/warning count summary.
+
+### Template Variables
+
+`derive_template_vars(name)` splits the project's name/path on `/`: the last segment is `{{PROJECT}}`, the second-to-last (if present) is `{{CLASS}}` — regardless of how much extra nesting (a semester folder, etc.) sits above that. `{{DATE}}` is today's date via the `date` command (`+%Y-%m-%d`, identical on macOS/Linux, no chrono dependency needed). `apply_template_vars()` then does a plain-text substitution across every `.tex`/`.bib`/`.cls`/`.sty` file under the new project directory — deliberately restricted to those extensions so binary assets (figures, etc.) are never touched. Because it's a blind find-and-replace, a template's own comments must avoid writing out `{{CLASS}}` etc. literally, or they'll get substituted too.
 
 ### Mindmap Integration
 
@@ -181,9 +187,13 @@ The `latex-to-mindmap-portable.sh` script converts LaTeX projects to interactive
 - Installs dependencies (pylatexenc, markmap-cli) on first run
 - Outputs `<projectname>_mindmap.html` and `<projectname>_mindmap.md`
 
+### Clean Build Folders
+
+`find_build_dirs()` recursively walks every configured root for directories with the exact name `.build` (never pattern-matched, so it can't ever catch something else) and doesn't recurse into one once found. `dir_size()` sums each one's contents before anything is shown, so `WaitingForCleanConfirm { build_dirs: Vec<(PathBuf, u64)> }` carries pre-computed sizes into the confirmation popup — the freed-space total reported afterward is exact, not re-measured after deletion. Each folder is removed independently in the `ConfirmYes` handler; one failure (e.g. a permissions error) is counted and reported but doesn't stop the rest or panic. This is menu-only, deliberately not exposed as a CLI shortcut.
+
 ### CLI Shortcuts
 
-`main()` parses `env::args()` before any terminal setup. `lx new <name> [-t template] [--root label]`, `lx open <query>`, and `lx recent`/`lx -r` all resolve entirely on the filesystem first via `resolve_cli()` — a bad root, missing template, name collision, or zero matches prints to stderr and exits (code 1) without ever entering raw mode / the alternate screen. Only a successful resolution proceeds into the terminal: either `CliStartState::OpenDirect` (open the editor + stream the compile popup) or `CliStartState::ShowPicker` (multiple `open` matches — reuses the recent-projects picker UI). Both pre-seed `App`'s `workflow`/`popup` before the event loop starts, reusing the exact same code a menu selection would use. `lx -h`/`--help` exits before even loading `tui.conf`.
+`main()` parses `env::args()` before any terminal setup. `lx new <name> [-t template] [--root label]`, the bare `lx <name>` shortcut (`CliCommand::Smart` — checks for an exact existing match across all configured roots first via `is_leaf_dir`; opens it if found in exactly one root, falls through to the same logic as `New` if found in none, errors asking for `--root`/`lx open` if found in more than one), `lx open <query>`, and `lx recent`/`lx -r` all resolve entirely on the filesystem first via `resolve_cli()` — a bad root, missing template, name collision, or zero matches prints to stderr and exits (code 1) without ever entering raw mode / the alternate screen. Only a successful resolution proceeds into the terminal: either `CliStartState::OpenDirect` (open the editor + stream the compile popup) or `CliStartState::ShowPicker` (multiple `open` matches — reuses the recent-projects picker UI). Both pre-seed `App`'s `workflow`/`popup` before the event loop starts, reusing the exact same code a menu selection would use. `lx -h`/`--help` exits before even loading `tui.conf`. Name+flag parsing (`-t`/`--template`, `--root`/`-w`, order-independent, validated) is shared between `new` and the bare-name form via `parse_name_and_flags()`.
 
 ## Codebase Notes
 

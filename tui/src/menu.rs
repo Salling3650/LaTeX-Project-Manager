@@ -30,6 +30,11 @@
 //        Shows the MRU list of recently opened/created projects, labelled
 //        "RootLabel:relative/path" (e.g. "Uni:2026-Fall/CS301/hw1").
 //
+//    Action::CleanBuildDirs { projects_roots }
+//        Recursively finds every directory literally named ".build" across
+//        all configured roots, shows a confirmation with the total size,
+//        then deletes them on "y". Never touches anything else.
+//
 //    Action::LaunchOutput { title, program, args, dir }
 //        Runs a command and streams its output into a popup window.
 //
@@ -66,6 +71,9 @@ pub enum Action {
     OpenLatexProject { projects_roots: Vec<ProjectRoot> },
     /// Show the MRU list of recently opened/created projects.
     OpenRecent,
+    /// Recursively find every .build/ folder across all configured project
+    /// roots, show how much space they'd free, and delete them on confirmation.
+    CleanBuildDirs { projects_roots: Vec<ProjectRoot> },
     /// Recursively browse one or more project roots, convert selection to mindmap.
     ConvertToMindmap { projects_roots: Vec<ProjectRoot>, tui_dir: PathBuf },
     EditConfig,
@@ -126,6 +134,11 @@ pub const ITEMS: &[MenuItem] = &[
                 tui_dir: cfg.workspace_root.clone(),
             }
         },
+    },
+
+    MenuItem {
+        label: "Clean build folders",
+        action: |cfg| Action::CleanBuildDirs { projects_roots: cfg.project_roots.clone() },
     },
 
     MenuItem {

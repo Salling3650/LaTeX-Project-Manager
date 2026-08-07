@@ -4,12 +4,29 @@ set -e
 # ─────────────────────────────────────────────────────────────────────────────
 # LaTeX Manager Setup Script
 # ─────────────────────────────────────────────────────────────────────────────
-# Installs dependencies, builds the TUI, and configures the system.
-# Supports macOS (Homebrew) and Linux (apt/pacman).
+# One command, no questions asked: installs dependencies (including a working
+# LaTeX distribution if you don't have one), builds the TUI, and sets up the
+# 'lx' command. Supports macOS (Homebrew) and Linux (apt/pacman).
+#
+# Every step is best-effort: if one thing fails (no sudo, no network, an
+# unknown distro), the script warns and keeps going rather than aborting —
+# you always end up with as much working as could be set up, never nothing.
+#
+# Flags:
+#   --skip-latex   Skip installing a LaTeX distribution (e.g. you already
+#                  have one under a name this script doesn't detect, or you
+#                  want to add it yourself later).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OS=$(uname -s)
 ARCH=$(uname -m)
+SKIP_LATEX=0
+
+for arg in "$@"; do
+    case "$arg" in
+        --skip-latex) SKIP_LATEX=1 ;;
+    esac
+done
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -18,22 +35,10 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 
-print_status() {
-    echo -e "${BLUE}➜${NC} $1"
-}
-
-print_success() {
-    echo -e "${GREEN}✓${NC} $1"
-}
-
-print_warning() {
-    echo -e "${YELLOW}⚠${NC} $1"
-}
-
-print_error() {
-    echo -e "${RED}✗${NC} $1"
-}
-
+print_status()  { echo -e "${BLUE}➜${NC} $1"; }
+print_success() { echo -e "${GREEN}✓${NC} $1"; }
+print_warning() { echo -e "${YELLOW}⚠${NC} $1"; }
+print_error()   { echo -e "${RED}✗${NC} $1"; }
 print_section() {
     echo ""
     echo -e "${BLUE}═══════════════════════════════════════════════════════════${NC}"
@@ -41,9 +46,96 @@ print_section() {
     echo -e "${BLUE}═══════════════════════════════════════════════════════════${NC}"
 }
 
-# Check if command exists
 command_exists() {
     command -v "$1" >/dev/null 2>&1
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LaTeX installation — the thing most likely to be missing, and the biggest
+# download, so it gets its own clearly-labelled step with its own fallback
+# messaging if it fails.
+# ─────────────────────────────────────────────────────────────────────────────
+
+install_latex_macos() {
+    if command_exists latexmk; then
+        print_success "latexmk found"
+        return 0
+    fi
+    if [ "$SKIP_LATEX" -eq 1 ]; then
+        print_warning "Skipping LaTeX install (--skip-latex)"
+        return 0
+    fi
+
+    print_status "No LaTeX found — installing BasicTeX (~100 MB)..."
+    if ! brew install --cask basictex; then
+        print_warning "BasicTeX install failed. Install it manually later with:"
+        echo "  brew install --cask basictex"
+        return 1
+    fi
+
+    # BasicTeX installs to a path that isn't on PATH in this shell session yet.
+    export PATH="/Library/TeX/texbin:$PATH"
+
+    print_status "Installing latexmk (may ask for your password)..."
+    if sudo /Library/TeX/texbin/tlmgr update --self >/dev/null 2>&1 \
+        && sudo /Library/TeX/texbin/tlmgr install latexmk >/dev/null 2>&1; then
+        print_success "LaTeX installed"
+    else
+        print_warning "latexmk install via tlmgr didn't complete. Finish it yourself with:"
+        echo "  sudo tlmgr update --self && sudo tlmgr install latexmk"
+        return 1
+    fi
+
+    print_status "Note: BasicTeX is minimal. If a document needs a package it doesn't"
+    print_status "have, the compile popup will show the missing package in red — fix"
+    print_status "it with: sudo tlmgr install <package-name>"
+}
+
+install_latex_linux() {
+    local distro="$1"
+    if command_exists latexmk; then
+        print_success "latexmk found"
+        return 0
+    fi
+    if [ "$SKIP_LATEX" -eq 1 ]; then
+        print_warning "Skipping LaTeX install (--skip-latex)"
+        return 0
+    fi
+
+    case "$distro" in
+        ubuntu|debian)
+            # Deliberately not texlive-full (5+ GB, very slow). This set
+            # covers essentially all coursework-level documents in a
+            # fraction of the time; missing packages show up clearly in the
+            # compile popup's error highlighting and are one `apt install`
+            # or `tlmgr install` away.
+            print_status "Installing LaTeX (texlive-latex-extra, ~300-500 MB)..."
+            sudo apt update
+            if sudo apt install -y texlive-latex-base texlive-latex-recommended \
+                texlive-latex-extra texlive-fonts-recommended latexmk; then
+                print_success "LaTeX installed"
+            else
+                print_warning "LaTeX install failed. Install it manually later with:"
+                echo "  sudo apt install texlive-latex-extra latexmk"
+                return 1
+            fi
+            ;;
+        arch|archarm)
+            print_status "Installing LaTeX (texlive-most, ~2 GB)..."
+            if sudo pacman -S --noconfirm texlive-most texlive-latexextra latexmk 2>/dev/null \
+                || sudo pacman -S --noconfirm texlive-most; then
+                print_success "LaTeX installed"
+            else
+                print_warning "LaTeX install failed. Install it manually later with:"
+                echo "  sudo pacman -S texlive-most"
+                return 1
+            fi
+            ;;
+        *)
+            print_warning "Unknown distro — install LaTeX manually (needs 'latexmk' on PATH)"
+            return 1
+            ;;
+    esac
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -53,62 +145,24 @@ command_exists() {
 install_dependencies_macos() {
     print_status "Installing dependencies via Homebrew..."
 
-    # Check if Homebrew is installed
     if ! command_exists brew; then
         print_error "Homebrew not found. Install from https://brew.sh"
         return 1
     fi
 
     local to_install=()
-
-    # Rust + Cargo
-    if ! command_exists cargo; then
-        to_install+=("rust")
-    fi
-
-    # Python3 + pyfiglet (build-time for ASCII art)
-    if ! command_exists python3; then
-        to_install+=("python3")
-    fi
-
-    # Neovim (for editing LaTeX)
-    if ! command_exists nvim; then
-        to_install+=("neovim")
-    fi
-
-    # latexmk (LaTeX compilation)
-    if ! command_exists latexmk; then
-        print_status "Note: latexmk requires MacTeX or BasicTeX. You can install it with:"
-        echo "  brew install --cask mactex          # Full (5 GB)"
-        echo "  brew install --cask basictex        # Minimal (100 MB)"
-        echo ""
-        print_warning "Skipping latexmk check (requires MacTeX/BasicTeX)"
-    fi
-
-    # rsync (template copying)
-    if ! command_exists rsync; then
-        to_install+=("rsync")
-    fi
-
-    # figlet (ASCII art header - optional but nice)
-    if ! command_exists figlet; then
-        print_warning "figlet not found (optional, for better output). Install with: brew install figlet"
-    fi
+    command_exists cargo   || to_install+=("rust")
+    command_exists python3 || to_install+=("python3")
+    command_exists nvim    || to_install+=("neovim")
+    command_exists rsync   || to_install+=("rsync")
+    command_exists npm     || to_install+=("node")   # for "Convert to mindmap" (markmap-cli)
 
     if [ ${#to_install[@]} -gt 0 ]; then
         print_status "Installing: ${to_install[*]}"
-        brew install "${to_install[@]}" || true
+        brew install "${to_install[@]}" || print_warning "Some packages may have failed to install"
     fi
 
-    # Install pyfiglet via pip
-    if ! python3 -c "import pyfiglet" 2>/dev/null; then
-        print_status "Installing pyfiglet..."
-        if command_exists pip3; then
-            pip3 install pyfiglet
-        else
-            python3 -m pip install pyfiglet
-        fi
-    fi
+    install_latex_macos || true
 
     print_success "Dependencies installed"
 }
@@ -116,102 +170,50 @@ install_dependencies_macos() {
 install_dependencies_linux() {
     print_status "Installing dependencies..."
 
-    # Detect Linux distribution
+    local distro="unknown"
     if [ -f /etc/os-release ]; then
         . /etc/os-release
-        DISTRO="$ID"
-    else
-        DISTRO="unknown"
+        distro="$ID"
     fi
 
     local to_install=()
 
-    case "$DISTRO" in
+    case "$distro" in
         ubuntu|debian)
-            # Rust + Cargo
-            if ! command_exists cargo; then
-                to_install+=("cargo" "rustc")
-            fi
-
-            # Python3 + pyfiglet
-            if ! command_exists python3; then
-                to_install+=("python3" "python3-pip")
-            fi
-
-            # Neovim
-            if ! command_exists nvim; then
-                to_install+=("neovim")
-            fi
-
-            # LaTeX
-            if ! command_exists latexmk; then
-                to_install+=("texlive-full" "latexmk")
-            fi
-
-            # rsync
-            if ! command_exists rsync; then
-                to_install+=("rsync")
-            fi
-
-            # figlet
-            if ! command_exists figlet; then
-                to_install+=("figlet")
-            fi
+            command_exists cargo  || to_install+=("cargo" "rustc")
+            command_exists python3 || to_install+=("python3" "python3-pip")
+            command_exists nvim   || to_install+=("neovim")
+            command_exists rsync  || to_install+=("rsync")
+            command_exists npm    || to_install+=("npm")   # for "Convert to mindmap" (markmap-cli)
 
             if [ ${#to_install[@]} -gt 0 ]; then
                 print_status "Running: sudo apt update && sudo apt install -y ${to_install[*]}"
                 sudo apt update
-                sudo apt install -y "${to_install[@]}" || true
+                sudo apt install -y "${to_install[@]}" || print_warning "Some packages may have failed to install"
             fi
             ;;
 
         arch|archarm)
-            if ! command_exists cargo; then
-                to_install+=("rustup")
-            fi
-
-            if ! command_exists python3; then
-                to_install+=("python")
-            fi
-
-            if ! command_exists nvim; then
-                to_install+=("neovim")
-            fi
-
-            if ! command_exists latexmk; then
-                to_install+=("texlive-most")
-            fi
-
-            if ! command_exists rsync; then
-                to_install+=("rsync")
-            fi
-
-            if ! command_exists figlet; then
-                to_install+=("figlet")
-            fi
+            command_exists cargo  || to_install+=("rustup")
+            command_exists python3 || to_install+=("python")
+            command_exists nvim   || to_install+=("neovim")
+            command_exists rsync  || to_install+=("rsync")
+            command_exists npm    || to_install+=("npm")   # for "Convert to mindmap" (markmap-cli)
 
             if [ ${#to_install[@]} -gt 0 ]; then
                 print_status "Running: sudo pacman -S ${to_install[*]}"
-                sudo pacman -S --noconfirm "${to_install[@]}" || true
+                sudo pacman -S --noconfirm "${to_install[@]}" || print_warning "Some packages may have failed to install"
             fi
             ;;
 
         *)
-            print_warning "Unknown Linux distribution: $DISTRO"
-            print_status "Please install manually: rust, python3, neovim, latexmk, rsync, figlet"
+            print_warning "Unknown Linux distribution: $distro"
+            print_status "Please install manually: rust, python3, neovim, latexmk, rsync, npm"
             return 1
             ;;
     esac
 
-    # Install pyfiglet via pip
-    if ! python3 -c "import pyfiglet" 2>/dev/null; then
-        print_status "Installing pyfiglet..."
-        if command_exists pip3; then
-            pip3 install --user pyfiglet
-        else
-            python3 -m pip install --user pyfiglet
-        fi
-    fi
+    install_latex_linux "$distro" || true
 
     print_success "Dependencies installed"
 }
@@ -233,10 +235,8 @@ build_tui() {
     print_status "Running: cargo build --release"
     cargo build --release
 
-    # Copy binary to tui/ directory for easier access
     cp target/release/tui tui
 
-    # Code signing on macOS
     if [ "$OS" = "Darwin" ]; then
         print_status "Code signing binary (macOS)..."
         codesign --force --deep --sign - tui || print_warning "Code signing failed (non-critical)"
@@ -256,114 +256,25 @@ setup_symlink() {
     local symlink_path="$target_dir/lx"
     local binary_path="$SCRIPT_DIR/tui/tui"
 
-    # Check if /usr/local/bin exists; if not, try alternatives
-    if [ ! -d "$target_dir" ]; then
+    if [ ! -w "$target_dir" ] 2>/dev/null; then
         target_dir="$HOME/.local/bin"
         symlink_path="$target_dir/lx"
         mkdir -p "$target_dir"
-        print_warning "/usr/local/bin not writable, using $target_dir instead"
+        print_warning "$target_dir not writable, using $HOME/.local/bin instead"
     fi
 
-    # Remove existing symlink if it points to old location
-    if [ -L "$symlink_path" ]; then
-        rm "$symlink_path"
-    fi
-
-    # Create symlink
+    [ -L "$symlink_path" ] && rm "$symlink_path"
     ln -sf "$binary_path" "$symlink_path"
 
     if [ -L "$symlink_path" ]; then
         print_success "Symlink created: $symlink_path -> $binary_path"
-
-        # Ensure ~/.local/bin is in PATH on Linux
         if [ "$OS" != "Darwin" ] && [[ ":$PATH:" != *":$target_dir:"* ]]; then
-            print_warning "Add to ~/.bashrc or ~/.zshrc to ensure 'lx' is in PATH:"
+            print_warning "Add this to ~/.bashrc or ~/.zshrc so 'lx' is on your PATH:"
             echo "  export PATH=\"$target_dir:\$PATH\""
         fi
     else
         print_error "Failed to create symlink"
         return 1
-    fi
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Setup PDF viewer alias
-# ─────────────────────────────────────────────────────────────────────────────
-
-setup_pdf_viewer() {
-    print_section "Setting up PDF viewer"
-
-    local shell_rc=""
-    if [ -f "$HOME/.zshrc" ]; then
-        shell_rc="$HOME/.zshrc"
-    elif [ -f "$HOME/.bashrc" ]; then
-        shell_rc="$HOME/.bashrc"
-    fi
-
-    if [ -z "$shell_rc" ]; then
-        print_warning "Could not find ~/.zshrc or ~/.bashrc"
-        return 0
-    fi
-
-    # Check if tdf alias already exists
-    if grep -q "alias tdf=" "$shell_rc"; then
-        print_status "tdf alias already configured in $shell_rc"
-        return 0
-    fi
-
-    # Suggest appropriate viewer based on OS
-    local pdf_viewer_cmd=""
-    if [ "$OS" = "Darwin" ]; then
-        pdf_viewer_cmd="open -a Preview"
-    else
-        pdf_viewer_cmd="xdg-open"
-    fi
-
-    print_status "Add this to $shell_rc to set up the 'tdf' PDF viewer alias:"
-    echo "  alias tdf=\"$pdf_viewer_cmd\""
-    echo ""
-
-    # Optionally add it
-    read -p "Add this alias now? (y/n) " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        echo "alias tdf=\"$pdf_viewer_cmd\"" >> "$shell_rc"
-        print_success "Alias added to $shell_rc"
-        print_status "Run: source $shell_rc"
-    fi
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Setup workspace root in config (optional)
-# ─────────────────────────────────────────────────────────────────────────────
-
-setup_workspace_config() {
-    print_section "Optional: Configure workspace root"
-
-    local config_file="$SCRIPT_DIR/tui/tui.conf"
-
-    # Check if workspace_root is already set
-    if grep -q "^workspace_root" "$config_file"; then
-        print_status "workspace_root already configured in tui.conf"
-        return 0
-    fi
-
-    print_status "The TUI auto-detects workspace root by looking for templates/"
-    print_status "You can explicitly set it in tui.conf if needed:"
-    echo "  workspace_root = $SCRIPT_DIR"
-    echo ""
-
-    read -p "Set workspace_root in tui.conf now? (y/n) " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        # Add workspace_root after the initial comments
-        {
-            head -n 13 "$config_file"
-            echo "workspace_root = $SCRIPT_DIR"
-            tail -n +14 "$config_file"
-        } > "$config_file.tmp"
-        mv "$config_file.tmp" "$config_file"
-        print_success "workspace_root set to $SCRIPT_DIR"
     fi
 }
 
@@ -375,21 +286,17 @@ verify_latex() {
     print_section "Verifying LaTeX installation"
 
     if command_exists latexmk; then
-        print_success "latexmk found"
+        print_success "latexmk found — compiling should work out of the box"
         return 0
     fi
 
-    print_warning "latexmk not found"
+    print_warning "latexmk still not found — compiling won't work until it's installed"
     if [ "$OS" = "Darwin" ]; then
-        echo "Install MacTeX or BasicTeX:"
-        echo "  brew install --cask mactex          # Full (5 GB)"
-        echo "  brew install --cask basictex        # Minimal (100 MB)"
-        echo "  sudo tlmgr update --self"
-        echo "  sudo tlmgr install latexmk"
+        echo "  brew install --cask basictex && sudo tlmgr update --self && sudo tlmgr install latexmk"
+        echo "  (then restart your terminal so /Library/TeX/texbin is on PATH)"
     else
-        echo "Install with your package manager:"
-        echo "  Debian/Ubuntu: sudo apt install texlive-full latexmk"
-        echo "  Arch: sudo pacman -S texlive-most"
+        echo "  Debian/Ubuntu: sudo apt install texlive-latex-extra latexmk"
+        echo "  Arch:          sudo pacman -S texlive-most"
     fi
     return 1
 }
@@ -408,9 +315,9 @@ main() {
 
     print_status "Detected OS: $OS ($ARCH)"
     print_status "Project directory: $SCRIPT_DIR"
+    [ "$SKIP_LATEX" -eq 1 ] && print_status "LaTeX install: skipped (--skip-latex)"
     echo ""
 
-    # Step 1: Install dependencies
     print_section "Step 1: Installing Dependencies"
     if [ "$OS" = "Darwin" ]; then
         install_dependencies_macos || exit 1
@@ -418,31 +325,18 @@ main() {
         install_dependencies_linux || exit 1
     fi
 
-    # Step 2: Build the TUI
     build_tui || exit 1
-
-    # Step 3: Setup symlink
     setup_symlink || print_warning "Failed to setup symlink"
+    verify_latex || true
 
-    # Step 4: Setup PDF viewer
-    setup_pdf_viewer
-
-    # Step 5: Setup workspace config (optional)
-    setup_workspace_config
-
-    # Step 6: Verify LaTeX
-    verify_latex || print_warning "LaTeX not fully installed yet"
-
-    # Final summary
     print_section "Setup Complete!"
     echo ""
-    echo -e "You can now run the TUI with:"
+    echo -e "Run it with:"
     echo -e "  ${GREEN}lx${NC}                 (if symlink is in PATH)"
     echo -e "  ${GREEN}$SCRIPT_DIR/tui/tui${NC}  (direct path)"
     echo ""
-    echo -e "To start using it:"
-    echo -e "  ${GREEN}cd $SCRIPT_DIR${NC}"
-    echo -e "  ${GREEN}lx${NC}"
+    echo -e "Try it now:"
+    echo -e "  ${GREEN}cd $SCRIPT_DIR && lx${NC}"
     echo ""
     echo "For more information, see README.md and QUICKSTART.md"
     echo ""

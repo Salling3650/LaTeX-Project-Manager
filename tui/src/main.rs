@@ -21,7 +21,7 @@ use crossterm::{
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
     Terminal,
@@ -144,7 +144,16 @@ impl PopupState {
             loop {
                 match rx.try_recv() {
                     Ok(Some(line)) => { self.lines.push(line); self.scroll = self.lines.len().saturating_sub(1); }
-                    Ok(None) => { self.done = true; break; }
+                    Ok(None) => {
+                        self.done = true;
+                        // On completion, jump straight to the first LaTeX error
+                        // (a line starting with "! ") instead of leaving the
+                        // view wherever the last line happened to land.
+                        if let Some(i) = self.lines.iter().position(|l| l.trim_start().starts_with("! ")) {
+                            self.scroll = i;
+                        }
+                        break;
+                    }
                     Err(_) => break,
                 }
             }
@@ -358,6 +367,77 @@ fn is_leaf_dir(path: &std::path::Path) -> bool {
         .any(|e| e.file_type().map(|ft| ft.is_file()).unwrap_or(false))
 }
 
+/// Recursively find every directory literally named ".build" under `dir`.
+/// Exact-name match only — never pattern-matched — so this can't ever pick
+/// up something it shouldn't. Doesn't recurse into a found ".build" dir
+/// (nothing meaningful would be nested inside one for our purposes).
+fn find_build_dirs(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+    let entries = match fs::read_dir(dir) { Ok(e) => e, Err(_) => return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let ty = match entry.file_type() { Ok(t) => t, Err(_) => continue };
+        if !ty.is_dir() { continue; }
+        if path.file_name().map(|n| n == ".build").unwrap_or(false) {
+            out.push(path);
+        } else {
+            find_build_dirs(&path, out);
+        }
+    }
+}
+
+/// Total size in bytes of all files under `path`, recursively. Unreadable
+/// entries are skipped rather than treated as an error — this is only ever
+/// used for an informational estimate, never for anything that needs to be
+/// exact.
+fn dir_size(path: &std::path::Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(entries) = fs::read_dir(path) {
+        for entry in entries.flatten() {
+            if let Ok(ty) = entry.file_type() {
+                if ty.is_dir() {
+                    total += dir_size(&entry.path());
+                } else if ty.is_file() {
+                    total += entry.metadata().map(|m| m.len()).unwrap_or(0);
+                }
+            }
+        }
+    }
+    total
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let b = bytes as f64;
+    if b >= GB { format!("{:.2} GB", b / GB) }
+    else if b >= MB { format!("{:.1} MB", b / MB) }
+    else if b >= KB { format!("{:.0} KB", b / KB) }
+    else { format!("{} B", bytes) }
+}
+
+/// Classify a line of `pdflatex`/`latexmk` output for highlighting in the
+/// compile popup. Returns `None` for lines that should render in the
+/// default style.
+fn classify_compile_line(line: &str) -> Option<Style> {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("! ") {
+        // Fatal LaTeX error, e.g. "! Undefined control sequence."
+        Some(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+    } else if trimmed.starts_with("l.") && trimmed[2..].chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+        // Source-line pointer that follows a "! " error, e.g. "l.42 ...".
+        Some(Style::default().fg(Color::Red))
+    } else if trimmed.starts_with("!!") || line.contains("Emergency stop") {
+        Some(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+    } else if line.contains("Warning") {
+        Some(Style::default().fg(Color::Yellow))
+    } else if line.contains("Overfull \\hbox") || line.contains("Underfull \\hbox") {
+        Some(Style::default().fg(Color::DarkGray))
+    } else {
+        None
+    }
+}
+
 /// Build a "RootLabel:relative/path" label for a project, used in the
 /// recent-projects list (e.g. "Uni:2026-Fall/CS301/hw1").
 fn compute_project_label(roots: &[(String, PathBuf)], path: &std::path::Path) -> String {
@@ -378,6 +458,10 @@ enum WorkflowState {
     WaitingForTemplateName { template_path: PathBuf, projects_dir: PathBuf, root_label: String },
     WaitingForProject,
     WaitingForRecentProject,
+    /// Deleting every found .build/ folder, pending confirmation. Each entry
+    /// carries its pre-computed size so the freed-space total is accurate
+    /// even though the folder is gone by the time we'd otherwise measure it.
+    WaitingForCleanConfirm { build_dirs: Vec<(PathBuf, u64)> },
     WaitingForMindmapProject { tui_dir: PathBuf },
     WaitingForEditorChoice,
     // Delete/rename, triggered from inside the recursive project browser.
@@ -463,6 +547,75 @@ fn prepare_build_dir(project_dir: &std::path::Path) {
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+/// Text-like extensions safe to run template-variable substitution on —
+/// deliberately narrow so binary assets (images in a template's figures/)
+/// can never be touched.
+const TEMPLATE_VAR_EXTS: &[&str] = &["tex", "bib", "cls", "sty"];
+
+/// Derive {{DATE}}, {{CLASS}}, {{PROJECT}} from the project name as
+/// typed/selected (e.g. "Efterår-2026/SurveyDesign/hw1"), split on '/'.
+/// {{CLASS}} is always the folder directly above the project, and
+/// {{PROJECT}} is the project's own folder — regardless of how much extra
+/// nesting (a semester folder, etc.) sits above that. A flat name with no
+/// '/' at all just gives an empty {{CLASS}}.
+fn derive_template_vars(name: &str) -> Vec<(&'static str, String)> {
+    let segments: Vec<&str> = name.split('/').filter(|s| !s.is_empty()).collect();
+    let (class, project) = match segments.len() {
+        0 => (String::new(), String::new()),
+        1 => (String::new(), segments[0].to_string()),
+        n => (segments[n - 2].to_string(), segments[n - 1].to_string()),
+    };
+    // `date` gives identical YYYY-MM-DD output on both macOS (BSD date) and
+    // Linux (GNU date) without needing a chrono-style dependency.
+    let date = Command::new("date").arg("+%Y-%m-%d").output().ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    vec![
+        ("{{DATE}}", date),
+        ("{{CLASS}}", class),
+        ("{{PROJECT}}", project),
+    ]
+}
+
+/// Substitute template variables in-place across text-like files under
+/// `project_dir` (recursively). Files with no matching tokens are left
+/// untouched (no needless rewrite), and non-text-extension files are
+/// skipped entirely regardless of content.
+fn apply_template_vars(project_dir: &std::path::Path, name: &str) {
+    let vars = derive_template_vars(name);
+    substitute_in_dir(project_dir, &vars);
+}
+
+fn substitute_in_dir(dir: &std::path::Path, vars: &[(&str, String)]) {
+    let entries = match fs::read_dir(dir) { Ok(e) => e, Err(_) => return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let ty = match entry.file_type() { Ok(t) => t, Err(_) => continue };
+        if ty.is_dir() {
+            substitute_in_dir(&path, vars);
+        } else if ty.is_file() {
+            let is_text = path.extension()
+                .map(|e| TEMPLATE_VAR_EXTS.contains(&e.to_string_lossy().as_ref()))
+                .unwrap_or(false);
+            if !is_text { continue; }
+            if let Ok(content) = fs::read_to_string(&path) {
+                let mut replaced = content;
+                let mut changed = false;
+                for (token, value) in vars {
+                    if replaced.contains(*token) {
+                        replaced = replaced.replace(*token, value);
+                        changed = true;
+                    }
+                }
+                if changed {
+                    let _ = fs::write(&path, replaced);
                 }
             }
         }
@@ -603,6 +756,9 @@ enum CliCommand {
     New { name: String, template: Option<String>, root: Option<String> },
     Open { query: String },
     Recent,
+    /// Bare `lx <name>`: open it if it exists in any configured root,
+    /// create it (same as New) otherwise.
+    Smart { name: String, template: Option<String>, root: Option<String> },
 }
 
 enum CliStartState {
@@ -615,10 +771,12 @@ fn print_cli_help() {
     println!("lx — LaTeX Manager\n");
     println!("Usage:");
     println!("  lx                                    Open the interactive menu");
-    println!("  lx new <name> [-t <template>] [--root <label>]");
-    println!("                                         Create a project and open it.");
+    println!("  lx <name> [-t <template>] [--root <label>]");
+    println!("                                         Open <name> if it exists, create it if not.");
     println!("                                         <name> may include '/' to nest it,");
     println!("                                         e.g. 2026-Fall/CS301/hw4");
+    println!("  lx new <name> [-t <template>] [--root <label>]");
+    println!("                                         Always create — errors if <name> already exists");
     println!("  lx open <query>                        Open a project matching <query>.");
     println!("                                         Opens directly on a single match,");
     println!("                                         otherwise shows a picker.");
@@ -626,8 +784,8 @@ fn print_cli_help() {
     println!("  lx -h | --help                         Show this help");
     println!();
     println!("Examples:");
-    println!("  lx new 2026-Fall/CS301/hw4");
-    println!("  lx new 2026-Fall/CS301/hw4 -t lab-report");
+    println!("  lx 2026-Fall/CS301/hw4                  # open it, or create it if it's new");
+    println!("  lx 2026-Fall/CS301/hw4 -t lab-report    # same, using a template if it needs creating");
     println!("  lx new hw5 --root Personal");
     println!("  lx open cs301");
     println!("  lx -r");
@@ -648,39 +806,57 @@ fn parse_cli_args() -> Result<CliCommand, String> {
             Ok(CliCommand::Open { query: args[1..].join(" ") })
         }
         "new" => {
-            let mut name = None;
-            let mut template = None;
-            let mut root = None;
-            let mut i = 1;
-            while i < args.len() {
-                let arg = args[i].as_str();
-                match arg {
-                    "-t" | "--template" => {
-                        let val = args.get(i + 1).filter(|v| !v.starts_with('-')).cloned()
-                            .ok_or_else(|| format!("{} requires a value, e.g. '{} lab-report'", arg, arg))?;
-                        template = Some(val);
-                        i += 2;
-                    }
-                    "--root" | "-w" => {
-                        let val = args.get(i + 1).filter(|v| !v.starts_with('-')).cloned()
-                            .ok_or_else(|| format!("{} requires a value, e.g. '{} Uni'", arg, arg))?;
-                        root = Some(val);
-                        i += 2;
-                    }
-                    other if other.starts_with('-') => {
-                        return Err(format!("Unknown option '{}' for 'lx new'. Run 'lx --help' for usage.", other));
-                    }
-                    other => {
-                        if name.is_none() { name = Some(other.to_string()); }
-                        i += 1;
-                    }
-                }
-            }
-            let name = name.ok_or_else(|| "Usage: lx new <name> [-t template] [--root label]".to_string())?;
+            let (name, template, root) = parse_name_and_flags(&args[1..])?;
             Ok(CliCommand::New { name, template, root })
         }
-        other => Err(format!("Unknown command '{}'. Run 'lx --help' for usage.", other)),
+        other if other.starts_with('-') => {
+            Err(format!("Unknown option '{}'. Run 'lx --help' for usage.", other))
+        }
+        _ => {
+            // Bare `lx <name>` shortcut: open it if it already exists in any
+            // configured root, create it otherwise. Same -t/--root flags as
+            // `lx new` apply if it turns out to need creating.
+            let (name, template, root) = parse_name_and_flags(&args)?;
+            Ok(CliCommand::Smart { name, template, root })
+        }
     }
+}
+
+/// Shared by `lx new` and the bare `lx <name>` shortcut: pulls the project
+/// name plus optional `-t/--template` and `--root/-w` flags out of an args
+/// slice, in any order, with clear errors for a missing flag value or an
+/// unrecognized option.
+fn parse_name_and_flags(args: &[String]) -> Result<(String, Option<String>, Option<String>), String> {
+    let mut name = None;
+    let mut template = None;
+    let mut root = None;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        match arg {
+            "-t" | "--template" => {
+                let val = args.get(i + 1).filter(|v| !v.starts_with('-')).cloned()
+                    .ok_or_else(|| format!("{} requires a value, e.g. '{} lab-report'", arg, arg))?;
+                template = Some(val);
+                i += 2;
+            }
+            "--root" | "-w" => {
+                let val = args.get(i + 1).filter(|v| !v.starts_with('-')).cloned()
+                    .ok_or_else(|| format!("{} requires a value, e.g. '{} Uni'", arg, arg))?;
+                root = Some(val);
+                i += 2;
+            }
+            other if other.starts_with('-') => {
+                return Err(format!("Unknown option '{}'. Run 'lx --help' for usage.", other));
+            }
+            other => {
+                if name.is_none() { name = Some(other.to_string()); }
+                i += 1;
+            }
+        }
+    }
+    let name = name.ok_or_else(|| "Usage: lx <name> [-t template] [--root label]".to_string())?;
+    Ok((name, template, root))
 }
 
 fn resolve_root<'a>(roots: &'a [config::ProjectRoot], wanted: &Option<String>) -> Result<&'a config::ProjectRoot, String> {
@@ -757,6 +933,7 @@ fn resolve_cli(cfg: &config::Config, cmd: CliCommand) -> Result<CliStartState, S
                 let src = cfg.workspace_root.join("templates").join("main.tex");
                 if src.exists() { let _ = fs::copy(&src, project_dir.join("main.tex")); }
             }
+            apply_template_vars(&project_dir, &name);
             Ok(CliStartState::OpenDirect { path: project_dir, label: format!("{}:{}", r.label, name) })
         }
         CliCommand::Open { query } => {
@@ -775,6 +952,26 @@ fn resolve_cli(cfg: &config::Config, cmd: CliCommand) -> Result<CliStartState, S
             match config::load_recent().into_iter().next() {
                 None => Err("No recent projects yet.".to_string()),
                 Some((label, path)) => Ok(CliStartState::OpenDirect { path, label }),
+            }
+        }
+        CliCommand::Smart { name, template, root } => {
+            let existing: Vec<&config::ProjectRoot> = cfg.project_roots.iter()
+                .filter(|r| is_leaf_dir(&r.path.join(&name)))
+                .collect();
+            match existing.len() {
+                1 => {
+                    let r = existing[0];
+                    let path = r.path.join(&name);
+                    Ok(CliStartState::OpenDirect { path, label: format!("{}:{}", r.label, name) })
+                }
+                0 => resolve_cli(cfg, CliCommand::New { name, template, root }),
+                _ => {
+                    let where_: Vec<String> = existing.iter().map(|r| r.label.clone()).collect();
+                    Err(format!(
+                        "'{}' exists in more than one root ({}) — use 'lx open {}' to pick, or --root to disambiguate.",
+                        name, where_.join(", "), name
+                    ))
+                }
             }
         }
     }
@@ -965,11 +1162,33 @@ fn main() -> io::Result<()> {
                         let start = popup.scroll.saturating_sub(inner_h.saturating_sub(1));
                         let visible: Vec<ListItem> = popup.lines.iter()
                             .skip(start).take(inner_h)
-                            .map(|l| ListItem::new(l.as_str())).collect();
-                        let status = if popup.done { " [done - Esc to close]" } else { " [running...]" };
+                            .map(|l| {
+                                let style = classify_compile_line(l).unwrap_or_default();
+                                ListItem::new(Line::styled(l.as_str(), style))
+                            }).collect();
+                        let err_count = popup.lines.iter().filter(|l| l.trim_start().starts_with("! ")).count();
+                        let warn_count = popup.lines.iter().filter(|l| l.contains("Warning")).count();
+                        let status = if popup.done {
+                            match (err_count, warn_count) {
+                                (0, 0) => " [done - Esc to close]".to_string(),
+                                (0, w) => format!(" [done \u{2014} {} warning{} - Esc to close]", w, if w == 1 { "" } else { "s" }),
+                                (e, 0) => format!(" [done \u{2014} {} error{} - Esc to close]", e, if e == 1 { "" } else { "s" }),
+                                (e, w) => format!(
+                                    " [done \u{2014} {} error{}, {} warning{} - Esc to close]",
+                                    e, if e == 1 { "" } else { "s" }, w, if w == 1 { "" } else { "s" }
+                                ),
+                            }
+                        } else {
+                            " [running...]".to_string()
+                        };
+                        let title_style = if popup.done && err_count > 0 {
+                            Style::default().fg(Color::Red)
+                        } else {
+                            Style::default()
+                        };
                         let list = List::new(visible).block(
                             Block::default()
-                                .title(format!(" {}{} ", popup.title, status))
+                                .title(Span::styled(format!(" {}{} ", popup.title, status), title_style))
                                 .borders(Borders::ALL));
                         f.render_widget(list, popup_area);
                     }
@@ -1309,6 +1528,25 @@ fn main() -> io::Result<()> {
                             app.popup = Some(popup);
                             app.workflow = Some(*resume);
                         }
+                        Some(WorkflowState::WaitingForCleanConfirm { build_dirs }) => {
+                            let total_count = build_dirs.len();
+                            let mut freed: u64 = 0;
+                            let mut failed = 0usize;
+                            for (dir, size) in &build_dirs {
+                                match fs::remove_dir_all(dir) {
+                                    Ok(()) => freed += size,
+                                    Err(_) => failed += 1,
+                                }
+                            }
+                            let succeeded = total_count - failed;
+                            app.message = Some(if failed == 0 {
+                                format!("Freed {} across {} build folder{}.",
+                                    format_bytes(freed), succeeded, if succeeded == 1 { "" } else { "s" })
+                            } else {
+                                format!("Freed {} across {} build folder{} ({} failed — check permissions).",
+                                    format_bytes(freed), succeeded, if succeeded == 1 { "" } else { "s" }, failed)
+                            });
+                        }
                         _ => {}
                     }
                 }
@@ -1321,6 +1559,9 @@ fn main() -> io::Result<()> {
                             popup.refresh_project_browser();
                             app.popup = Some(popup);
                             app.workflow = Some(*resume);
+                        }
+                        Some(WorkflowState::WaitingForCleanConfirm { .. }) => {
+                            app.message = Some("Cancelled — nothing deleted.".to_string());
                         }
                         _ => { app.workflow = None; }
                     }
@@ -1346,6 +1587,7 @@ fn main() -> io::Result<()> {
                                 let _ = fs::create_dir_all(&project_dir);
                                 let src = templates_dir.join("main.tex");
                                 if src.exists() { let _ = fs::copy(&src, project_dir.join("main.tex")); }
+                                apply_template_vars(&project_dir, &name);
                                 if let Err(e) = open_editor_in_project(&cfg.editor, &project_dir, &mut terminal) {
                                     app.message = Some(format!("Failed to launch editor: {}", e));
                                 }
@@ -1363,6 +1605,7 @@ fn main() -> io::Result<()> {
                                 if let Err(e) = copy_dir_filtered(&template_path, &project_dir) {
                                     app.message = Some(format!("Failed to copy template: {}", e));
                                 }
+                                apply_template_vars(&project_dir, &name);
                                 if let Err(e) = open_editor_in_project(&cfg.editor, &project_dir, &mut terminal) {
                                     app.message = Some(format!("Failed to launch editor: {}", e));
                                 }
@@ -1469,6 +1712,26 @@ fn main() -> io::Result<()> {
                         } else {
                             app.workflow = Some(WorkflowState::WaitingForRecentProject);
                             app.popup = Some(PopupState::new_recent_picker("Recent projects:", &recent));
+                        }
+                    }
+                    menu::Action::CleanBuildDirs { projects_roots } => {
+                        let mut found = Vec::new();
+                        for r in &projects_roots {
+                            find_build_dirs(&r.path, &mut found);
+                        }
+                        if found.is_empty() {
+                            app.message = Some("No .build folders found — nothing to clean.".to_string());
+                        } else {
+                            let build_dirs: Vec<(PathBuf, u64)> = found.into_iter()
+                                .map(|p| { let size = dir_size(&p); (p, size) })
+                                .collect();
+                            let total: u64 = build_dirs.iter().map(|(_, s)| s).sum();
+                            let msg = format!(
+                                "Delete {} .build folder{}, freeing about {}? This cannot be undone.",
+                                build_dirs.len(), if build_dirs.len() == 1 { "" } else { "s" }, format_bytes(total)
+                            );
+                            app.workflow = Some(WorkflowState::WaitingForCleanConfirm { build_dirs });
+                            app.popup = Some(PopupState::new_confirm(&msg));
                         }
                     }
                     menu::Action::ConvertToMindmap { projects_roots, tui_dir } => {

@@ -11,6 +11,9 @@ A terminal UI for creating and managing LaTeX projects, built with Rust + [ratat
 - **Type to filter** — inside any browser, just start typing to narrow the list down; arrow keys move the selection, Backspace on an empty filter goes up a folder
 - **Rename / delete** — while browsing projects, `Ctrl+R` renames and `Ctrl+D` deletes the highlighted folder or project (delete asks for confirmation first)
 - **Recent projects** — a new menu item showing your last few opened/created projects, labelled `RootLabel:relative/path` (e.g. `Uni:2026-Fall/CS301/hw1`)
+- **Template variables** — `{{DATE}}`, `{{CLASS}}`, and `{{PROJECT}}` in any `.tex`/`.bib`/`.cls`/`.sty` file get filled in automatically when a project is created. `{{CLASS}}` is the folder directly above the project (e.g. `SurveyDesign` in `Efterår-2026/SurveyDesign/hw1`); `{{PROJECT}}` is the project's own folder name. A flat name with no `/` just leaves `{{CLASS}}` empty.
+- **Compile error highlighting** — the compile popup colours `! ` fatal errors red, warnings yellow, and jumps straight to the first error when compilation finishes; the popup title shows an error/warning count
+- **Clean build folders** — a new menu item that finds every `.build/` folder across all configured roots, shows how much space they're using, and deletes them all on confirmation
 - **Nested project names** — organize projects into folders by typing a name with `/`, e.g. `2026-Fall/CS301/hw1`, or by browsing into subfolders you created by hand
 - Streamed compile output in a popup window
 - Auto-opens the PDF in your configured viewer after a successful compile
@@ -29,8 +32,9 @@ cd /path/to/Latex && ./tui/tui
 For quick actions without navigating the menu:
 
 ```bash
-lx new 2026-Fall/CS301/hw4                  # blank project, opens + compiles
-lx new 2026-Fall/CS301/hw4 -t lab-report    # from a template
+lx 2026-Fall/CS301/hw4                      # opens it if it exists, creates it if not
+lx 2026-Fall/CS301/hw4 -t lab-report        # same, but from a template if it needs creating
+lx new 2026-Fall/CS301/hw4                  # always create — errors instead of opening if it exists
 lx new hw5 --root Personal                  # pick a root when more than one is configured
 lx open cs301                               # open by name; picker shown if more than one match
 lx -r                                       # or: lx recent — reopen your last project

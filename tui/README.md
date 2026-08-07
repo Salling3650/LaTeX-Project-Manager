@@ -10,6 +10,9 @@ The Rust terminal interface for LaTeX Manager, built with [Ratatui](https://gith
 - Centered, keyboard-navigated menu
 - Recursive, multi-root project browser with type-to-filter, rename (`Ctrl+R`), and delete (`Ctrl+D`, with confirmation)
 - Recent-projects list (MRU, labelled `RootLabel:relative/path`)
+- Template variables (`{{DATE}}`, `{{CLASS}}`, `{{PROJECT}}`) auto-filled on project creation
+- Compile popup highlights errors/warnings and jumps to the first error
+- "Clean build folders" — finds and deletes every `.build/` folder across all roots, with a size estimate and confirmation first
 - Popup overlays for command output, the project/template browser, and text input
 - Colour theming via `tui.conf`
 - All menu items live in one file — easy to customise
@@ -19,13 +22,10 @@ The Rust terminal interface for LaTeX Manager, built with [Ratatui](https://gith
 ## Requirements
 
 - Rust + Cargo — https://rustup.rs
-- Python 3 + pyfiglet (for the ASCII art title at build time)
 
-```bash
-pip3 install pyfiglet
-# or if your system pip is externally managed:
-pipx install pyfiglet
-```
+That's it to build the TUI itself. The ASCII-art title is generated at compile time by the `figlet-rs` crate (a normal `[build-dependencies]` entry in `Cargo.toml`), so `cargo build` handles it automatically — no Python, no `pip install`, no system `figlet` binary needed.
+
+(Separately, LaTeX itself and Neovim are needed to actually *use* the tool — see `../setup.sh` or `../QUICKSTART.md`, which install those for you.)
 
 ---
 
@@ -102,6 +102,28 @@ Available colour names: `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `c
 
 ---
 
+### Template variables
+
+Any `.tex`, `.bib`, `.cls`, or `.sty` file copied into a new project has these tokens replaced automatically:
+
+| Variable | Value |
+|---|---|
+| `{{DATE}}` | Today's date, `YYYY-MM-DD` |
+| `{{CLASS}}` | The folder directly above the project (e.g. `SurveyDesign` in `Efterår-2026/SurveyDesign/hw1`); empty for a flat name with no `/` |
+| `{{PROJECT}}` | The project's own folder name (e.g. `hw1`) |
+
+This applies to "Blank project," "Template selector," and `lx new` alike — the values are derived from whatever name/path you give the project, not from any folder-naming convention it has to guess at.
+
+**Caveat:** substitution is a plain text find-and-replace across the whole file, including inside LaTeX comments. If you write `{{CLASS}}` in a `%` comment to document your own template, it'll get replaced too. Keep any notes-to-self about a template's variables in a separate file (or this README) rather than inline in the `.tex` itself.
+
+---
+
+### Clean build folders
+
+Recursively finds every directory literally named `.build` across all configured project roots, shows the total count and disk usage, and deletes them on confirmation. Exact-name match only (never a pattern), and nothing is deleted without an explicit "y" — one failed deletion (e.g. a permissions issue) doesn't stop the rest or crash the tool; the summary tells you if anything was skipped.
+
+---
+
 ## Key bindings
 
 | Key | Action |
@@ -119,12 +141,13 @@ Available colour names: `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `c
 ## CLI shortcuts
 
 ```bash
-lx new 2026-Fall/CS301/hw4                  # blank project, opens + compiles
-lx new 2026-Fall/CS301/hw4 -t lab-report    # from a template
+lx 2026-Fall/CS301/hw4                      # opens it if it exists, creates it if not
+lx 2026-Fall/CS301/hw4 -t lab-report        # same, but from a template if it needs creating
+lx new 2026-Fall/CS301/hw4                  # always create — errors instead of opening if it exists
 lx new hw5 --root Personal                  # pick a root when more than one is configured
 lx open cs301                               # open by name; picker shown if more than one match
 lx -r                                       # or: lx recent — reopen your last project
 lx -h                                       # or: lx --help
 ```
 
-These resolve entirely before the TUI opens — an unknown project, missing template, or ambiguous root prints an error and exits instead of launching the interface.
+These resolve entirely before the TUI opens — an unknown project, missing template, or ambiguous root prints an error and exits instead of launching the interface. The bare `lx <name>` form checks for an exact existing match in each configured root first; if it's in more than one root at once, it'll ask you to disambiguate with `lx open` or `--root` rather than guessing.

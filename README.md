@@ -19,6 +19,26 @@ A terminal UI for creating and managing LaTeX projects, built with Rust + [ratat
 - Auto-opens the PDF in your configured viewer after a successful compile
 - Adaptive ASCII title banner (two-line large font, falls back to smaller sizes as the window shrinks)
 
+## Screenshots
+
+<p align="center">
+    <img src="media/menu-main.png" alt="Main menu" width="95%" />
+</p>
+
+<p align="center">
+    <img src="media/project-browser.png" alt="Recursive project browser" width="95%" />
+</p>
+
+<p align="center">
+    <img src="media/recent-projects-filter.png" alt="Recent projects filter" width="95%" />
+</p>
+
+## Demo Video
+
+Inline preview (GIF):
+
+![Demo preview](media/demo-inline.gif)
+
 ## Usage
 
 ```bash

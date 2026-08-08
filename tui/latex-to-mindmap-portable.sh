@@ -32,22 +32,31 @@ if [ ! -f "$LATEX_FILE" ]; then
     exit 1
 fi
 
-# Find the converter project
-# Priority: LATEX_MINDMAP_PROJECT env var > ../latex-to-mindmap > default location
-if [ -n "$LATEX_MINDMAP_PROJECT" ]; then
-    CONVERTER_DIR="$LATEX_MINDMAP_PROJECT"
-elif [ -d "../latex-to-mindmap" ]; then
-    CONVERTER_DIR="$(cd ../latex-to-mindmap && pwd)"
-elif [ -d "../latex to mindmap" ]; then
-    CONVERTER_DIR="$(cd "../latex to mindmap" && pwd)"
-else
-    # Default fallback location
-    CONVERTER_DIR="/Users/REDACTED/Desktop/projects/Programming/0_Done/LaTeX_mindmap/latex to mindmap"
-fi
+# Find the converter project.
+# Priority: LATEX_MINDMAP_PROJECT env var > locations relative to this script.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-if [ ! -f "$CONVERTER_DIR/latex_to_mindmap.py" ]; then
-    echo "Error: Could not find latex_to_mindmap.py in $CONVERTER_DIR"
-    echo "Set LATEX_MINDMAP_PROJECT env var or place script near the converter"
+find_converter_dir() {
+    local candidate
+    for candidate in \
+        "$LATEX_MINDMAP_PROJECT" \
+        "$SCRIPT_DIR/../latex-to-mindmap" \
+        "$SCRIPT_DIR/../latex to mindmap" \
+        "$SCRIPT_DIR/../../latex-to-mindmap" \
+        "$SCRIPT_DIR/../../latex to mindmap" \
+        "$SCRIPT_DIR/../../LaTeX_mindmap/latex to mindmap"
+    do
+        if [ -n "$candidate" ] && [ -f "$candidate/latex_to_mindmap.py" ]; then
+            printf '%s\n' "$(cd "$candidate" && pwd)"
+            return 0
+        fi
+    done
+    return 1
+}
+
+if ! CONVERTER_DIR="$(find_converter_dir)"; then
+    echo "Error: Could not find latex_to_mindmap.py near this app or in LATEX_MINDMAP_PROJECT"
+    echo "Set LATEX_MINDMAP_PROJECT to the converter project directory"
     exit 1
 fi
 

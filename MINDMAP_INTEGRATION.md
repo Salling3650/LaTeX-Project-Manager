@@ -29,8 +29,8 @@ export LATEX_MINDMAP_PROJECT="/path/to/latex-to-mindmap"
 ```
 
 This tells the script where to find the converter. If not set, it looks for the converter in:
-1. `../latex-to-mindmap` (relative to TUI)
-2. `/Users/REDACTED/Desktop/projects/Programming/1_Work_in_progress/LaTeX_mindmap/latex to mindmap` (default)
+1. Near the launcher script itself
+2. Nearby sibling install locations next to the shipped app
 
 ## What Gets Generated
 
